@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    body {
+      width: 320px;
+      margin: 0;
+      padding: 14px;
+      font-family: -apple-system, "Hiragino Sans", sans-serif;
+      font-size: 13px;
+      color: #0f1419;
+    }
+    h1 { font-size: 15px; margin: 0 0 12px; }
+    h2 { font-size: 12px; color: #536471; margin: 16px 0 6px; font-weight: 700; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 22px; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 6px 2px 12px; border-radius: 999px;
+      font-size: 12px; font-weight: 600;
+    }
+    .chip-user { background: #e8f5fd; color: #1d9bf0; border: 1px solid #a8d8f8; }
+    .chip-auto { background: #f5f5f5; color: #536471; border: 1px solid #d9d9d9; }
+    .chip button {
+      border: none; background: none; cursor: pointer;
+      color: inherit; font-size: 13px; padding: 0 2px; line-height: 1;
+    }
+    .add-row { display: flex; gap: 6px; margin-top: 8px; }
+    .add-row input {
+      flex: 1; padding: 6px 10px; border: 1px solid #cfd9de;
+      border-radius: 999px; font-size: 13px; outline: none;
+    }
+    .add-row input:focus { border-color: #1d9bf0; }
+    .add-row button {
+      padding: 6px 14px; border: none; border-radius: 999px;
+      background: #1d9bf0; color: #fff; font-weight: 700; cursor: pointer;
+    }
+    .freq-list { display: flex; flex-direction: column; gap: 2px; }
+    .freq-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 3px 0;
+    }
+    .freq-word { font-weight: 600; }
+    .freq-count { color: #536471; font-size: 11px; margin-left: 8px; }
+    .freq-add {
+      border: 1px solid #1d9bf0; background: #fff; color: #1d9bf0;
+      border-radius: 999px; padding: 1px 10px; cursor: pointer; font-size: 12px;
+    }
+    label.setting { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+    .threshold-row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+    .threshold-row input { width: 56px; padding: 3px 6px; }
+    .reset {
+      margin-top: 12px; width: 100%; padding: 6px; border: 1px solid #cfd9de;
+      border-radius: 999px; background: #fff; color: #536471; cursor: pointer;
+    }
+    .empty { color: #8b98a5; font-size: 12px; }
+    .hint { color: #8b98a5; font-weight: 400; font-size: 11px; }
+    .chip-active { outline: 2px solid #1d9bf0; }
+    .editor {
+      margin-top: 10px; padding: 10px; border: 1px solid #cfd9de;
+      border-radius: 10px; background: #f7f9f9;
+    }
+    .editor-row { margin-bottom: 8px; }
+    .editor-row label { display: block; font-size: 11px; font-weight: 700; margin-bottom: 3px; }
+    .editor-row input {
+      width: 100%; box-sizing: border-box; padding: 5px 8px;
+      border: 1px solid #cfd9de; border-radius: 6px; font-size: 12px; outline: none;
+    }
+    .editor-row input:focus { border-color: #1d9bf0; }
+    .editor-actions { display: flex; gap: 6px; justify-content: flex-end; }
+    .editor-actions button {
+      padding: 4px 14px; border-radius: 999px; border: 1px solid #cfd9de;
+      background: #fff; cursor: pointer; font-size: 12px;
+    }
+    .editor-actions button.primary {
+      background: #1d9bf0; color: #fff; border-color: #1d9bf0; font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <h1>X Tagger</h1>
+
+  <h2>タグ <span class="hint">(クリックで同義語・除外語を編集)</span></h2>
+  <div id="keywords" class="chips"></div>
+  <div class="add-row">
+    <input id="new-keyword" type="text" placeholder="タグを追加" />
+    <button id="add-btn">追加</button>
+  </div>
+
+  <div id="editor" class="editor" style="display: none">
+    <div class="editor-row">
+      <label>表示名</label>
+      <input id="edit-label" type="text" />
+    </div>
+    <div class="editor-row">
+      <label>同義語 <span class="hint">(カンマ区切り)</span></label>
+      <input id="edit-words" type="text" placeholder="例: パイソン, python3" />
+    </div>
+    <div class="editor-row">
+      <label>除外語 <span class="hint">(これを含む部分は無視)</span></label>
+      <input id="edit-excludes" type="text" placeholder="例: 猫背" />
+    </div>
+    <div class="editor-actions">
+      <button id="edit-save" class="primary">保存</button>
+      <button id="edit-cancel">キャンセル</button>
+    </div>
+  </div>
+
+  <h2>自動タグ(頻出単語から昇格)</h2>
+  <div id="auto-keywords" class="chips"></div>
+
+  <h2>頻出単語 上位</h2>
+  <div id="freq" class="freq-list"></div>
+
+  <h2>設定</h2>
+  <label class="setting">
+    <input type="checkbox" id="hide-promoted" /> 広告(プロモーション)を非表示
+  </label>
+  <label class="setting">
+    <input type="checkbox" id="filter-mode" /> タグに一致しないツイートを非表示
+    <span class="hint">(ホームTLのみ)</span>
+  </label>
+  <label class="setting">
+    <input type="checkbox" id="auto-enabled" /> 頻出単語の自動タグ化を有効にする
+  </label>
+  <div class="threshold-row">
+    自動タグ化のしきい値:
+    <input type="number" id="auto-threshold" min="2" /> 回
+  </div>
+
+  <button id="reset-counts" class="reset">頻出単語のカウントをリセット</button>
+
+  <script src="popup.js"></script>
+</body>
+</html>

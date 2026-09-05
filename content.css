@@ -1,0 +1,58 @@
+/* X Tagger - タイムラインに注入するスタイル */
+
+.xt-hidden {
+  display: none !important;
+}
+
+/* メルカリ検索風のタグチップ */
+.xt-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 8px;
+}
+
+.xt-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.6;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* ユーザー登録キーワード */
+.xt-chip-user {
+  background: #e8f5fd;
+  color: #1d9bf0;
+  border: 1px solid #a8d8f8;
+}
+
+/* 自動タグ化された頻出単語 */
+.xt-chip-auto {
+  background: #f5f5f5;
+  color: #536471;
+  border: 1px solid #d9d9d9;
+}
+
+/* キーワードにヒットしたツイートのハイライト。
+   Xはホバー時に行の背景色を差し替えるため、backgroundやbox-shadowだと
+   上書きされて消える。擬似要素の青いバーを最前面に重ねて対処 */
+article.xt-hit {
+  position: relative;
+  background: rgba(29, 155, 240, 0.05) !important;
+}
+
+article.xt-hit::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: #1d9bf0;
+  z-index: 10;
+  pointer-events: none;
+}
