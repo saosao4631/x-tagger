@@ -3,132 +3,338 @@
 <head>
   <meta charset="UTF-8" />
   <style>
+    :root {
+      --blue: #1d9bf0;
+      --blue-dark: #1a8cd8;
+      --blue-bg: #e8f5fd;
+      --blue-border: #a8d8f8;
+      --text: #0f1419;
+      --muted: #536471;
+      --faint: #8b98a5;
+      --bg: #f0f3f5;
+      --card: #ffffff;
+      --border: #e1e8ed;
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
     body {
-      width: 320px;
+      width: 344px;
       margin: 0;
-      padding: 14px;
-      font-family: -apple-system, "Hiragino Sans", sans-serif;
+      padding: 0 0 14px;
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", sans-serif;
       font-size: 13px;
-      color: #0f1419;
+      color: var(--text);
+      background: var(--bg);
+      -webkit-font-smoothing: antialiased;
     }
-    h1 { font-size: 15px; margin: 0 0 12px; }
-    h2 { font-size: 12px; color: #536471; margin: 16px 0 6px; font-weight: 700; }
-    .chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 22px; }
+
+    /* ---- ヘッダー ---- */
+    .header {
+      background: linear-gradient(135deg, #1d9bf0, #0d6efd);
+      color: #fff;
+      padding: 14px 16px 12px;
+      margin-bottom: 12px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: 0.3px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .header h1::before { content: "🏷️"; font-size: 15px; }
+    .header p { margin: 3px 0 0 26px; font-size: 11px; opacity: 0.85; }
+
+    /* ---- カード ---- */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      margin: 0 12px 10px;
+    }
+    .card h2 {
+      font-size: 11px;
+      color: var(--muted);
+      margin: 0 0 8px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .hint { color: var(--faint); font-weight: 400; font-size: 10px; }
+    .empty { color: var(--faint); font-size: 12px; }
+
+    /* ---- チップ ---- */
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 24px; }
     .chip {
-      display: inline-flex; align-items: center; gap: 4px;
-      padding: 2px 6px 2px 12px; border-radius: 999px;
-      font-size: 12px; font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 3px 7px 3px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      transition: box-shadow 0.12s, transform 0.08s;
     }
-    .chip-user { background: #e8f5fd; color: #1d9bf0; border: 1px solid #a8d8f8; }
-    .chip-auto { background: #f5f5f5; color: #536471; border: 1px solid #d9d9d9; }
+    .chip:hover { box-shadow: 0 1px 4px rgba(0, 0, 0, 0.14); transform: translateY(-1px); }
+    .chip-user { background: var(--blue-bg); color: var(--blue); border: 1px solid var(--blue-border); }
+    .chip-auto { background: #f5f5f5; color: var(--muted); border: 1px solid #d9d9d9; }
+    .chip-active { outline: 2px solid var(--blue); outline-offset: 1px; }
     .chip button {
-      border: none; background: none; cursor: pointer;
-      color: inherit; font-size: 13px; padding: 0 2px; line-height: 1;
+      border: none;
+      background: none;
+      cursor: pointer;
+      color: inherit;
+      opacity: 0.45;
+      font-size: 13px;
+      padding: 0 3px;
+      line-height: 1;
+      border-radius: 50%;
+      transition: opacity 0.12s;
     }
-    .add-row { display: flex; gap: 6px; margin-top: 8px; }
+    .chip button:hover { opacity: 1; }
+
+    /* ---- 追加フォーム ---- */
+    .add-row { display: flex; gap: 6px; margin-top: 10px; }
     .add-row input {
-      flex: 1; padding: 6px 10px; border: 1px solid #cfd9de;
-      border-radius: 999px; font-size: 13px; outline: none;
+      flex: 1;
+      padding: 7px 12px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.12s, box-shadow 0.12s;
     }
-    .add-row input:focus { border-color: #1d9bf0; }
+    .add-row input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(29, 155, 240, 0.15); }
     .add-row button {
-      padding: 6px 14px; border: none; border-radius: 999px;
-      background: #1d9bf0; color: #fff; font-weight: 700; cursor: pointer;
+      padding: 7px 16px;
+      border: none;
+      border-radius: 999px;
+      background: var(--blue);
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.12s;
     }
-    .freq-list { display: flex; flex-direction: column; gap: 2px; }
-    .freq-row {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 3px 0;
-    }
-    .freq-word { font-weight: 600; }
-    .freq-count { color: #536471; font-size: 11px; margin-left: 8px; }
-    .freq-add {
-      border: 1px solid #1d9bf0; background: #fff; color: #1d9bf0;
-      border-radius: 999px; padding: 1px 10px; cursor: pointer; font-size: 12px;
-    }
-    label.setting { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
-    .threshold-row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
-    .threshold-row input { width: 56px; padding: 3px 6px; }
-    .reset {
-      margin-top: 12px; width: 100%; padding: 6px; border: 1px solid #cfd9de;
-      border-radius: 999px; background: #fff; color: #536471; cursor: pointer;
-    }
-    .empty { color: #8b98a5; font-size: 12px; }
-    .hint { color: #8b98a5; font-weight: 400; font-size: 11px; }
-    .chip-active { outline: 2px solid #1d9bf0; }
+    .add-row button:hover { background: var(--blue-dark); }
+
+    /* ---- タグ編集パネル ---- */
     .editor {
-      margin-top: 10px; padding: 10px; border: 1px solid #cfd9de;
-      border-radius: 10px; background: #f7f9f9;
+      margin-top: 10px;
+      padding: 12px;
+      border: 1px solid var(--blue-border);
+      border-radius: 10px;
+      background: #f5fbff;
     }
-    .editor-row { margin-bottom: 8px; }
-    .editor-row label { display: block; font-size: 11px; font-weight: 700; margin-bottom: 3px; }
+    .editor-row { margin-bottom: 9px; }
+    .editor-row label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
     .editor-row input {
-      width: 100%; box-sizing: border-box; padding: 5px 8px;
-      border: 1px solid #cfd9de; border-radius: 6px; font-size: 12px; outline: none;
+      width: 100%;
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 12px;
+      outline: none;
+      transition: border-color 0.12s, box-shadow 0.12s;
     }
-    .editor-row input:focus { border-color: #1d9bf0; }
-    .editor-actions { display: flex; gap: 6px; justify-content: flex-end; }
+    .editor-row input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(29, 155, 240, 0.15); }
+    .editor-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 2px; }
     .editor-actions button {
-      padding: 4px 14px; border-radius: 999px; border: 1px solid #cfd9de;
-      background: #fff; cursor: pointer; font-size: 12px;
+      padding: 5px 16px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      transition: background 0.12s;
     }
+    .editor-actions button:hover { background: var(--bg); }
     .editor-actions button.primary {
-      background: #1d9bf0; color: #fff; border-color: #1d9bf0; font-weight: 700;
+      background: var(--blue);
+      color: #fff;
+      border-color: var(--blue);
+      font-weight: 700;
     }
+    .editor-actions button.primary:hover { background: var(--blue-dark); }
+
+    /* ---- 頻出単語 ---- */
+    .freq-list { display: flex; flex-direction: column; }
+    .freq-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 5px 6px;
+      border-radius: 8px;
+      transition: background 0.1s;
+    }
+    .freq-row:hover { background: var(--bg); }
+    .freq-word { font-weight: 600; }
+    .freq-count {
+      color: var(--faint);
+      font-size: 10px;
+      margin-left: 7px;
+      background: var(--bg);
+      border-radius: 999px;
+      padding: 1px 7px;
+    }
+    .freq-row:hover .freq-count { background: #e3e9ed; }
+    .freq-add {
+      border: 1px solid var(--blue);
+      background: #fff;
+      color: var(--blue);
+      border-radius: 999px;
+      padding: 2px 11px;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      opacity: 0.55;
+      transition: opacity 0.12s, background 0.12s;
+    }
+    .freq-row:hover .freq-add { opacity: 1; }
+    .freq-add:hover { background: var(--blue-bg); }
+
+    /* ---- 設定(トグルスイッチ) ---- */
+    .setting {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 2px;
+      cursor: pointer;
+    }
+    .setting-label { display: flex; flex-direction: column; gap: 1px; }
+    .setting-label .hint { font-size: 10px; }
+    .switch { position: relative; width: 36px; height: 21px; flex-shrink: 0; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute;
+      inset: 0;
+      background: #cfd9de;
+      border-radius: 999px;
+      transition: background 0.15s;
+    }
+    .slider::before {
+      content: "";
+      position: absolute;
+      width: 17px;
+      height: 17px;
+      left: 2px;
+      top: 2px;
+      background: #fff;
+      border-radius: 50%;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+      transition: transform 0.15s;
+    }
+    .switch input:checked + .slider { background: var(--blue); }
+    .switch input:checked + .slider::before { transform: translateX(15px); }
+
+    .threshold-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 2px;
+      color: var(--text);
+    }
+    .threshold-row input {
+      width: 58px;
+      padding: 4px 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 12px;
+      text-align: right;
+      outline: none;
+    }
+    .threshold-row input:focus { border-color: var(--blue); }
+
+    .reset {
+      margin-top: 8px;
+      width: 100%;
+      padding: 7px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.12s, color 0.12s;
+    }
+    .reset:hover { background: #fde8e8; color: #c0392b; border-color: #f5c6c6; }
   </style>
 </head>
 <body>
-  <h1>X Tagger</h1>
-
-  <h2>タグ <span class="hint">(クリックで同義語・除外語を編集)</span></h2>
-  <div id="keywords" class="chips"></div>
-  <div class="add-row">
-    <input id="new-keyword" type="text" placeholder="タグを追加" />
-    <button id="add-btn">追加</button>
+  <div class="header">
+    <h1>X Tagger</h1>
+    <p>タイムラインにタグを付けて整理する</p>
   </div>
 
-  <div id="editor" class="editor" style="display: none">
-    <div class="editor-row">
-      <label>表示名</label>
-      <input id="edit-label" type="text" />
+  <div class="card">
+    <h2>タグ <span class="hint">クリックで同義語・除外語を編集</span></h2>
+    <div id="keywords" class="chips"></div>
+    <div class="add-row">
+      <input id="new-keyword" type="text" placeholder="タグを追加..." />
+      <button id="add-btn">追加</button>
     </div>
-    <div class="editor-row">
-      <label>同義語 <span class="hint">(カンマ区切り)</span></label>
-      <input id="edit-words" type="text" placeholder="例: パイソン, python3" />
-    </div>
-    <div class="editor-row">
-      <label>除外語 <span class="hint">(これを含む部分は無視)</span></label>
-      <input id="edit-excludes" type="text" placeholder="例: 猫背" />
-    </div>
-    <div class="editor-actions">
-      <button id="edit-save" class="primary">保存</button>
-      <button id="edit-cancel">キャンセル</button>
+
+    <div id="editor" class="editor" style="display: none">
+      <div class="editor-row">
+        <label>表示名</label>
+        <input id="edit-label" type="text" />
+      </div>
+      <div class="editor-row">
+        <label>同義語(カンマ区切り)</label>
+        <input id="edit-words" type="text" placeholder="例: パイソン, python3" />
+      </div>
+      <div class="editor-row">
+        <label>除外語(これを含む部分は無視)</label>
+        <input id="edit-excludes" type="text" placeholder="例: 猫背" />
+      </div>
+      <div class="editor-actions">
+        <button id="edit-cancel">キャンセル</button>
+        <button id="edit-save" class="primary">保存</button>
+      </div>
     </div>
   </div>
 
-  <h2>自動タグ(頻出単語から昇格)</h2>
-  <div id="auto-keywords" class="chips"></div>
-
-  <h2>頻出単語 上位</h2>
-  <div id="freq" class="freq-list"></div>
-
-  <h2>設定</h2>
-  <label class="setting">
-    <input type="checkbox" id="hide-promoted" /> 広告(プロモーション)を非表示
-  </label>
-  <label class="setting">
-    <input type="checkbox" id="filter-mode" /> タグに一致しないツイートを非表示
-    <span class="hint">(ホームTLのみ)</span>
-  </label>
-  <label class="setting">
-    <input type="checkbox" id="auto-enabled" /> 頻出単語の自動タグ化を有効にする
-  </label>
-  <div class="threshold-row">
-    自動タグ化のしきい値:
-    <input type="number" id="auto-threshold" min="2" /> 回
+  <div class="card">
+    <h2>自動タグ <span class="hint">頻出単語から自動で昇格</span></h2>
+    <div id="auto-keywords" class="chips"></div>
   </div>
 
-  <button id="reset-counts" class="reset">頻出単語のカウントをリセット</button>
+  <div class="card">
+    <h2>頻出単語 <span class="hint">タイムラインから集計</span></h2>
+    <div id="freq" class="freq-list"></div>
+  </div>
+
+  <div class="card">
+    <h2>設定</h2>
+    <label class="setting">
+      <span class="setting-label">広告を非表示</span>
+      <span class="switch"><input type="checkbox" id="hide-promoted" /><span class="slider"></span></span>
+    </label>
+    <label class="setting">
+      <span class="setting-label">タグに一致しないツイートを非表示<span class="hint">ホームタイムラインのみ</span></span>
+      <span class="switch"><input type="checkbox" id="filter-mode" /><span class="slider"></span></span>
+    </label>
+    <label class="setting">
+      <span class="setting-label">頻出単語の自動タグ化</span>
+      <span class="switch"><input type="checkbox" id="auto-enabled" /><span class="slider"></span></span>
+    </label>
+    <div class="threshold-row">
+      <span>自動タグ化のしきい値(回)</span>
+      <input type="number" id="auto-threshold" min="2" />
+    </div>
+    <button id="reset-counts" class="reset">頻出単語のカウントをリセット</button>
+  </div>
 
   <script src="popup.js"></script>
 </body>

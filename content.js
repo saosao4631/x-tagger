@@ -61,14 +61,16 @@ function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// 単語 → 判定用正規表現。英数字のみの単語は \b で単語境界を要求するので
-// 「python」が「python3」や「cpython」に誤マッチしない。
+// 単語 → 判定用正規表現。英数字のみの単語は先頭だけ \b を付けた前方一致にする。
+// 「run」で running / runner にもヒットし、「cpython」のような
+// 別単語の途中にはヒットしない。catch のような不要ヒットは
+// ユーザーが除外語に追加して弾く運用。
 // 日本語は分かち書きがなく \b が機能しないため部分一致のまま
 function wordPattern(w) {
   const nw = normalize(w);
   if (!nw) return null;
   const esc = escapeRegex(nw);
-  return /^\w+$/.test(nw) ? new RegExp(`\\b${esc}\\b`) : new RegExp(esc);
+  return /^\w+$/.test(nw) ? new RegExp(`\\b${esc}`) : new RegExp(esc);
 }
 
 // タグ・自動タグの正規表現はツイートごとに作らず、設定変更時に一括コンパイル
@@ -120,8 +122,11 @@ function countWords(rawText) {
     if (w.length < 2) continue;
     if (/^[\d\s\p{P}]+$/u.test(w)) continue;
     if (STOPWORDS.has(w)) continue;
-    // 2文字以下のひらがなのみの語は助詞・助動詞がほとんどなので除外
-    if (w.length <= 2 && /^[぀-ゟ]+$/.test(w)) continue;
+    // 名詞だけを数えたい。形態素解析なしで品詞は分からないが、
+    // 日本語の動詞・形容詞・助詞はほぼ必ずひらがなを含むため、
+    // ひらがなを含む語を除外すると残りはほぼ名詞になる
+    // (漢字・カタカナ・英数字のみの語だけを集計する)
+    if (/[぀-ゟ]/.test(w)) continue;
     state.wordCounts[w] = (state.wordCounts[w] || 0) + 1;
     dirty = true;
   }
@@ -129,7 +134,23 @@ function countWords(rawText) {
 
 // ------------------------------------------------------- 集計の保存と自動昇格
 
+// 拡張機能の更新・再読み込み後、ページに残った古いスクリプトが
+// chrome.* APIを呼ぶと "Extension context invalidated" になる。
+// 検知したら監視とタイマーを止めて静かに引退する
+function extensionAlive() {
+  return typeof chrome !== "undefined" && !!chrome.runtime?.id;
+}
+
+function shutdown() {
+  observer.disconnect();
+  clearInterval(flushTimer);
+}
+
 function flushCounts() {
+  if (!extensionAlive()) {
+    shutdown();
+    return;
+  }
   if (!dirty) return;
   dirty = false;
 
@@ -145,10 +166,14 @@ function flushCounts() {
     compileMatchers();
   }
 
-  chrome.storage.local.set({
-    wordCounts: state.wordCounts,
-    autoKeywords: state.autoKeywords,
-  });
+  try {
+    chrome.storage.local.set({
+      wordCounts: state.wordCounts,
+      autoKeywords: state.autoKeywords,
+    });
+  } catch {
+    shutdown();
+  }
 }
 
 function promoteFrequentWords() {
@@ -166,7 +191,7 @@ function promoteFrequentWords() {
   }
 }
 
-setInterval(flushCounts, FLUSH_INTERVAL_MS);
+const flushTimer = setInterval(flushCounts, FLUSH_INTERVAL_MS);
 
 // ------------------------------------------------------------ ツイート処理
 
@@ -179,14 +204,17 @@ function isHomeTimeline() {
   return location.pathname === "/home" || location.pathname === "/";
 }
 
+// Xの広告ラベルは表記ゆれがある(日本語UI/英語UI・時期によって変わる)
+const AD_LABELS = new Set(["プロモーション", "promoted", "ad", "広告"]);
+
 function isPromoted(article) {
   // 広告ツイートは placementTracking でラップされることが多い
   if (article.closest('[data-testid="placementTracking"]')) return true;
   if (article.querySelector('[data-testid="placementTracking"]')) return true;
-  // フォールバック: 表示テキストで判定
+  // フォールバック: 表示テキストで判定(入れ子でない末端のspanのみ見る)
   for (const span of article.querySelectorAll("span")) {
-    const t = span.textContent;
-    if (t === "プロモーション" || t === "Promoted" || t === "Ad") return true;
+    if (span.childElementCount > 0) continue;
+    if (AD_LABELS.has(span.textContent.trim().toLowerCase())) return true;
   }
   return false;
 }
@@ -218,14 +246,14 @@ function processTweet(article) {
     return;
   }
 
+  // 本文テキストがないツイート(画像・動画のみ等)も rawText="" として
+  // 処理を続ける。フィルタモードで取りこぼさないため
   const textEl = article.querySelector('[data-testid="tweetText"]');
-  if (!textEl) return;
-
-  const rawText = textEl.innerText;
+  const rawText = textEl ? textEl.innerText : "";
   const text = normalize(rawText);
 
   // 単語集計はツイートIDごとに1回だけ(再描画・スクロール往復で重複させない)
-  if (link && !countedTweetIds.has(link)) {
+  if (rawText && link && !countedTweetIds.has(link)) {
     countedTweetIds.add(link);
     if (countedTweetIds.size > COUNTED_IDS_MAX) countedTweetIds.clear();
     countWords(rawText);
