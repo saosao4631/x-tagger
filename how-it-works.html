@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>X Tagger はどう作られているか</title>
+<style>
+  :root {
+    --blue: #1d9bf0;
+    --blue-dark: #0d6efd;
+    --ink: #0f1419;
+    --muted: #536471;
+    --faint: #8b98a5;
+    --bg: #f7f9f9;
+    --card: #ffffff;
+    --border: #e1e8ed;
+    --code-bg: #0f172a;
+    --purple: #6d28d9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif;
+    color: var(--ink);
+    line-height: 1.9;
+    background: var(--bg);
+  }
+  header {
+    background: linear-gradient(135deg, var(--blue), var(--blue-dark));
+    color: #fff;
+    padding: 52px 24px 44px;
+    text-align: center;
+  }
+  header h1 { margin: 0 0 10px; font-size: 30px; letter-spacing: 0.5px; }
+  header p { margin: 0; opacity: 0.92; font-size: 15px; }
+  main { max-width: 820px; margin: 0 auto; padding: 24px 20px 96px; }
+
+  nav.toc {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 22px;
+    margin-top: 24px;
+  }
+  nav.toc h2 { font-size: 13px; color: var(--muted); margin: 0 0 10px; letter-spacing: 1px; }
+  nav.toc ol { margin: 0; padding-left: 20px; }
+  nav.toc li { margin: 5px 0; }
+  nav.toc a { color: var(--blue); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+
+  section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 26px 30px;
+    margin-top: 26px;
+  }
+  h2.sec {
+    font-size: 22px;
+    margin: 0 0 14px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--blue);
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  h2.sec .n {
+    font-size: 14px;
+    color: #fff;
+    background: var(--blue);
+    border-radius: 8px;
+    padding: 2px 9px;
+    flex-shrink: 0;
+  }
+  h3 { font-size: 17px; margin: 24px 0 6px; }
+  p { margin: 10px 0; }
+  strong { color: #0b3d63; }
+  .lead { font-size: 15.5px; }
+  .muted { color: var(--muted); }
+
+  .analogy {
+    border-left: 4px solid var(--blue);
+    background: rgba(29, 155, 240, 0.06);
+    border-radius: 0 10px 10px 0;
+    padding: 12px 18px;
+    margin: 16px 0;
+  }
+  .analogy b { color: var(--blue-dark); }
+
+  .note {
+    background: #fff8e6;
+    border: 1px solid #f5d97a;
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin: 16px 0;
+    font-size: 14.5px;
+  }
+  .warn {
+    background: #fdecec;
+    border: 1px solid #f3b7b7;
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin: 16px 0;
+    font-size: 14.5px;
+  }
+
+  code {
+    background: #eef3f6;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-size: 13.5px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+  pre {
+    background: var(--code-bg);
+    color: #e2e8f0;
+    border-radius: 12px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.7;
+    margin: 14px 0;
+  }
+  pre code { background: none; border: none; padding: 0; color: inherit; font-size: 13px; }
+  .c-com { color: #7d8ca3; }
+  .c-key { color: #7dd3fc; }
+  .c-str { color: #86efac; }
+  .c-fn  { color: #fca5a5; }
+
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--bg); white-space: nowrap; }
+
+  /* 図: 3つの世界 */
+  .diagram {
+    display: grid;
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .box {
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 16px;
+    background: #fbfdff;
+  }
+  .box .t { font-weight: 700; font-size: 14px; margin-bottom: 3px; }
+  .box .d { font-size: 13px; color: var(--muted); }
+  .box.page { border-color: #a8d8f8; background: #f2fbff; }
+  .box.bg { border-color: #c4b5fd; background: #f7f5ff; }
+  .box.store { border-color: #fcd34d; background: #fffbeb; }
+  .arrow { text-align: center; color: var(--faint); font-size: 13px; margin: -4px 0; }
+
+  .step {
+    display: flex;
+    gap: 14px;
+    margin: 14px 0;
+    align-items: flex-start;
+  }
+  .step .num {
+    flex-shrink: 0;
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    background: var(--blue);
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700;
+  }
+  .step .body { flex: 1; }
+  .step .body b { display: block; }
+
+  footer {
+    text-align: center;
+    color: var(--faint);
+    font-size: 13px;
+    padding: 30px 20px 60px;
+  }
+  .tag-demo {
+    display: inline-block;
+    background: #e8f5fd; color: var(--blue);
+    border: 1px solid #a8d8f8; border-radius: 999px;
+    padding: 2px 12px; font-size: 13px; font-weight: 700;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>X Tagger はどう作られているか</h1>
+  <p>ブラウザ拡張機能の仕組みを、コードを知らない人にも分かるように解説します</p>
+</header>
+
+<main>
+
+<nav class="toc">
+  <h2>もくじ</h2>
+  <ol>
+    <li><a href="#s1">そもそも「拡張機能」とは何か</a></li>
+    <li><a href="#s2">なぜ他人のサイト(X)を書き換えられるのか</a></li>
+    <li><a href="#s3">なぜツイートを「非表示」にできるのか</a></li>
+    <li><a href="#s4">X Tagger の全体像 — 4つの登場人物</a></li>
+    <li><a href="#s5">1枚のツイートが処理される流れ</a></li>
+    <li><a href="#s6">つまずきポイントと、その解決の工夫</a></li>
+    <li><a href="#s7">ファイルの役割一覧</a></li>
+    <li><a href="#s8">安全性 — 何を「できない」ようにしているか</a></li>
+  </ol>
+</nav>
+
+<!-- 1 -->
+<section id="s1">
+  <h2 class="sec"><span class="n">1</span>そもそも「拡張機能」とは何か</h2>
+  <p class="lead">ブラウザ拡張機能(ブラウザエクステンション)は、<strong>Chrome などのブラウザに後から追加できる小さなプログラム</strong>です。特別な言語や専用ソフトは必要なく、ホームページを作るのと同じ <code>HTML</code> / <code>CSS</code> / <code>JavaScript</code> という3つの技術だけで作られています。</p>
+
+  <div class="analogy">
+    <b>たとえるなら:</b> ブラウザという「テレビ」に対して、拡張機能は後付けの「<b>字幕装置</b>」や「<b>CMスキップ機能</b>」のようなものです。テレビ本体(ブラウザ)を作り直すのではなく、映っている映像に横から手を加えます。
+  </div>
+
+  <p>拡張機能の中身は、ただのファイルの集まりです。X Tagger も、フォルダの中に数個のテキストファイルが入っているだけです。その中で一番大事なのが <code>manifest.json</code>(マニフェスト=目録)という<strong>設計図</strong>のファイルです。ここに「この拡張機能の名前は何か」「どのサイトで動くのか」「何を許可してほしいのか」が書かれています。</p>
+
+  <pre><code><span class="c-com">// manifest.json(抜粋)— 拡張機能の設計図</span>
+{
+  <span class="c-key">"name"</span>: <span class="c-str">"X Tagger"</span>,
+  <span class="c-key">"permissions"</span>: [<span class="c-str">"storage"</span>],           <span class="c-com">// データ保存を許可してほしい</span>
+  <span class="c-key">"content_scripts"</span>: [{
+    <span class="c-key">"matches"</span>: [<span class="c-str">"https://x.com/*"</span>],   <span class="c-com">// x.com のページで動く</span>
+    <span class="c-key">"js"</span>: [<span class="c-str">"statistics.js"</span>, <span class="c-str">"content.js"</span>]
+  }]
+}</code></pre>
+
+  <p>Chrome はこの設計図を読んで、「なるほど、この拡張機能は x.com のページで <code>content.js</code> というプログラムを動かし、データの保存機能を使いたいのだな」と理解し、その通りに動かしてくれます。</p>
+</section>
+
+<!-- 2 -->
+<section id="s2">
+  <h2 class="sec"><span class="n">2</span>なぜ他人のサイト(X)を書き換えられるのか</h2>
+  <p class="lead">「Xは自分が作ったサイトじゃないのに、どうして勝手にツイートを消したりできるの?」— これが一番の疑問だと思います。カギは<strong>「Webページの正体」</strong>にあります。</p>
+
+  <h3>Webページは、実は「組み立て説明書」</h3>
+  <p>私たちが見ているXのタイムラインは、完成した1枚の画像ではありません。ブラウザがXのサーバーから受け取った<strong>HTMLという設計図(部品の組み立て説明書)</strong>を、その場で組み立てて表示したものです。1つ1つのツイートは、次のような「部品(要素)」として組み立てられています。</p>
+
+  <pre><code><span class="c-com">&lt;!-- Xのタイムラインの中身(イメージ)--&gt;</span>
+<span class="c-key">&lt;article</span> data-testid=<span class="c-str">"tweet"</span><span class="c-key">&gt;</span>        <span class="c-com">← ツイート1枚 = article という箱</span>
+  <span class="c-key">&lt;div</span> data-testid=<span class="c-str">"tweetText"</span><span class="c-key">&gt;</span>今日はPythonの勉強<span class="c-key">&lt;/div&gt;</span>
+<span class="c-key">&lt;/article&gt;</span>
+<span class="c-key">&lt;article</span> data-testid=<span class="c-str">"tweet"</span><span class="c-key">&gt;</span> ... <span class="c-key">&lt;/article&gt;</span>   <span class="c-com">← 次のツイート</span></code></pre>
+
+  <p>この「組み立てられた部品の集まり」を <strong>DOM(ドム / Document Object Model)</strong> と呼びます。DOMはブラウザの中に置かれた<strong>「積み木の作品」</strong>のようなもので、JavaScript というプログラムから自由に触れます。積み木を1個抜いたり、色を塗ったり、新しい積み木を足したりできるのです。</p>
+
+  <div class="analogy">
+    <b>ポイント:</b> Xの<b>サーバー</b>(向こう側)は書き換えられません。でも、あなたのパソコンに<b>いま表示されている積み木の作品(DOM)</b>は、あなたのブラウザの中にあるので、拡張機能から触れます。X Tagger がしているのは「サーバーへの攻撃」ではなく、「手元に届いた作品の見た目を、自分好みに組み替える」ことだけです。
+  </div>
+
+  <h3>拡張機能は、ページの中に「同居」する</h3>
+  <p>設計図(manifest)の <code>content_scripts</code> に登録されたプログラム(=コンテンツスクリプト、X Tagger では <code>content.js</code>)は、指定したサイトを開いた瞬間に<strong>そのページの中へ送り込まれ、ページと同じDOMを共有します</strong>。だからページ本体と同じように積み木(ツイート)を読んだり触ったりできる、というわけです。</p>
+</section>
+
+<!-- 3 -->
+<section id="s3">
+  <h2 class="sec"><span class="n">3</span>なぜツイートを「非表示」にできるのか</h2>
+  <p class="lead">仕組みが分かれば、非表示は意外と単純です。<strong>ツイートを本当に削除しているのではなく、「見えないように隠している」だけ</strong>です。</p>
+
+  <h3>やっていることは「見えなくする印」を付けるだけ</h3>
+  <p>CSS(見た目を決める言語)には <code>display: none</code> という命令があります。これは「この部品を画面から消して、無かったことにする」という意味です。X Tagger は、隠したいツイートに <code>xt-hidden</code> という<strong>目印(クラス)</strong>を付けるだけ。あらかじめ用意しておいたCSSが「その目印が付いた部品は消す」と決めているので、印が付いた瞬間に画面から消えます。</p>
+
+  <pre><code><span class="c-com">/* content.css — 「xt-hidden の印が付いた部品は消す」というルール */</span>
+.xt-hidden { <span class="c-key">display</span>: none !important; }</code></pre>
+
+  <pre><code><span class="c-com">// content.js — 広告だと判定したら、消す印を付ける(実際のコードの要点)</span>
+<span class="c-key">if</span> (state.settings.hidePromoted && <span class="c-fn">isPromoted</span>(article)) {
+  cell.classList.<span class="c-fn">add</span>(<span class="c-str">"xt-hidden"</span>);   <span class="c-com">// ← これで画面から消える</span>
+  <span class="c-key">return</span>;
+}</code></pre>
+
+  <h3>広告やタグはどう見分けているのか</h3>
+  <p>ツイートを消したり印を付けたりするには、まず「どれが広告か」「どれが興味のあるツイートか」を見分ける必要があります。X Tagger は主に2つの手がかりを使います。</p>
+  <ul>
+    <li><strong>広告の判定:</strong> Xは広告ツイートを <code>placementTracking</code> という特別な部品で包む傾向があり、それを目印にします。加えて「プロモーション」「広告」「Ad」といった表示文字も手がかりにします。</li>
+    <li><strong>タグの判定:</strong> ツイート本文(<code>tweetText</code> という部品)の文字を読み取り、あなたが登録したキーワードが含まれているかを調べます。含まれていれば、本文の上に<span class="tag-demo">Python</span>のような丸いチップ(これも新しく作った積み木)を差し込みます。</li>
+  </ul>
+
+  <div class="note">
+    <b>なぜ <code>data-testid</code> を目印にするのか:</b> Xのデザイン上の名前(クラス名)は <code>css-1dbjc4n</code> のように自動生成されていて、頻繁に変わります。それを頼りにするとすぐ壊れます。一方 <code>data-testid="tweet"</code> はX自身が<strong>テスト用に付けている目印</strong>で、変更頻度が低いため、比較的長く使えます。それでもXの大改修で変わる可能性はあります。
+  </div>
+
+  <h3>「タグに合うものだけ表示」も同じ仕組み</h3>
+  <p>フィルタモード(タグに一致しないツイートを隠す機能)も、原理は広告非表示とまったく同じです。「登録タグにも自動タグにも当てはまらないツイート」に <code>xt-hidden</code> の印を付けているだけです。だから<strong>「削除」ではなく「非表示」</strong>——設定を切れば元通り全部見えます。</p>
+</section>
+
+<!-- 4 -->
+<section id="s4">
+  <h2 class="sec"><span class="n">4</span>X Tagger の全体像 — 4つの登場人物</h2>
+  <p class="lead">X Tagger は1つの大きなプログラムではなく、役割の違う<strong>4人の担当者</strong>が連携して動いています。それぞれ住んでいる「場所」が違うのがポイントです。</p>
+
+  <div class="diagram">
+    <div class="box page">
+      <div class="t">① content.js（Xのページの中に住む「現場担当」）</div>
+      <div class="d">タイムラインを見張り、ツイートに印やチップを付け、隠し、本文の単語を数える。DOMに触れるのはこの人だけ。</div>
+    </div>
+    <div class="arrow">▲ 数えた単語を報告 ／ ▼ 集計結果を受け取る</div>
+    <div class="box bg">
+      <div class="t">② background.js（ブラウザの裏で常駐する「集計の司令塔」）</div>
+      <div class="d">複数のタブから届く「この単語を数えて」という報告を1つずつ順番に処理し、セットごとの集計を管理する。頻出語の自動タグ昇格もここが判断する。</div>
+    </div>
+    <div class="arrow">▲ 設定・タグを読み書き ／ ▼ 集計を読み書き</div>
+    <div class="box store">
+      <div class="t">③ chrome.storage（ブラウザ内の「金庫」）</div>
+      <div class="d">タグ・設定・単語の集計を保存する場所。すべてあなたのパソコンの中。外部サーバーには一切送られない。</div>
+    </div>
+    <div class="arrow">▲ 設定を保存 ／ ▼ 現在の設定を表示</div>
+    <div class="box">
+      <div class="t">④ popup.html / popup.js（ツールバーの「設定画面」）</div>
+      <div class="d">アイコンを押すと開く画面。タグの登録・編集、セットの切り替え、頻出単語ランキングの表示、AI補助の操作を担当する。</div>
+    </div>
+  </div>
+
+  <p>この4人に加えて、共通で使う道具箱として <code>statistics.js</code> があります。「単語をどう正規化するか」「タグの内容が変わったかを表す“署名”をどう作るか」といった<strong>3人が共通で使う計算ルール</strong>をここにまとめ、①②④のどこからでも同じルールを呼べるようにしています。</p>
+
+  <h3>なぜ「司令塔(background)」を分けたのか</h3>
+  <p>Xは複数のタブで同時に開けます。もし各タブの現場担当(content.js)が金庫に直接書き込むと、タブAとタブBが同時に書いて<strong>片方の集計を上書きしてしまう</strong>事故が起きます。そこで、書き込みは必ず司令塔ひとりに任せ、届いた報告を<strong>順番待ちの列(キュー)にして1つずつ処理</strong>することで、上書き事故を防いでいます。</p>
+
+  <pre><code><span class="c-com">// background.js — 報告を1件ずつ順番に処理する「順番待ちの列」</span>
+<span class="c-key">let</span> queue = Promise.<span class="c-fn">resolve</span>();
+chrome.runtime.onMessage.<span class="c-fn">addListener</span>((message, sender, sendResponse) => {
+  queue = queue.<span class="c-fn">then</span>(() => <span class="c-fn">handle</span>(message)) ...  <span class="c-com">// 前の処理が終わってから次を実行</span>
+});</code></pre>
+</section>
+
+<!-- 5 -->
+<section id="s5">
+  <h2 class="sec"><span class="n">5</span>1枚のツイートが処理される流れ</h2>
+  <p class="lead">スクロールして1枚のツイートが画面に現れてから、ランキングに反映されるまでを追ってみましょう。</p>
+
+  <div class="step">
+    <div class="num">1</div>
+    <div class="body"><b>新しいツイートの出現に気づく</b>
+    現場担当(content.js)は <strong>MutationObserver(変化の見張り役)</strong> を使い、ページに新しい部品が追加された瞬間を検知します。X全体を常にスキャンするのではなく、<strong>変化があった部分だけ</strong>を見に行きます(これが軽さの秘訣)。</div>
+  </div>
+  <div class="step">
+    <div class="num">2</div>
+    <div class="body"><b>広告なら隠す</b>
+    そのツイートが広告だと判定したら <code>xt-hidden</code> の印を付けて、ここで処理終了。</div>
+  </div>
+  <div class="step">
+    <div class="num">3</div>
+    <div class="body"><b>タグと照合してチップを付ける</b>
+    本文を読み、登録タグ・自動タグにヒットすれば、本文の上にチップを差し込み、背景をうっすら青くします。どれにもヒットせず、かつフィルタモードがONなら、ここで隠します。</div>
+  </div>
+  <div class="step">
+    <div class="num">4</div>
+    <div class="body"><b>単語を数える（ヒットしたツイートだけ）</b>
+    タグに一致したツイートに限り、本文を単語に分解して数えます。「Python関連の投稿の中で、他に何がよく出てくるか(=Django, 機械学習…)」を知るためです。無関係なツイートの単語はランキングに混ぜません。</div>
+  </div>
+  <div class="step">
+    <div class="num">5</div>
+    <div class="body"><b>まとめて司令塔に報告</b>
+    数えた単語は毎回すぐ送らず、<strong>15秒ごとにまとめて</strong>司令塔(background.js)に送ります。司令塔は金庫の集計に足し込み、しきい値(初期20回)を超えた単語を自動タグに昇格させます。</div>
+  </div>
+  <div class="step">
+    <div class="num">6</div>
+    <div class="body"><b>設定画面に反映</b>
+    ポップアップを開くと、司令塔から最新の集計を受け取り、頻出単語ランキングとして表示します。</div>
+  </div>
+
+  <h3>日本語の「単語の切り分け」はどうやっている?</h3>
+  <p>英語は単語の間にスペースがありますが、日本語は「今日はPythonの勉強」のように区切りがありません。そこで <strong>Chrome に内蔵された <code>Intl.Segmenter</code></strong> という日本語分割機能を使っています(追加のライブラリ不要)。さらにノイズを減らすため、次のような語は数えません。</p>
+  <ul>
+    <li><strong>ひらがなを含む語</strong> — 「食べる」「楽しい」「から」など動詞・形容詞・助詞はほぼ必ずひらがなを含むので、これを除くと残りはほぼ名詞(テーマ語)になります。</li>
+    <li><strong>英語の機能語</strong> — <code>of / at / to / and</code> などは意味が薄いので除外。ただし <code>AI / UI / DB</code> のような短くても意味のある略語は残します。</li>
+    <li>絵文字・記号・URL・メンション・「今日」などの一般語。</li>
+  </ul>
+</section>
+
+<!-- 6 -->
+<section id="s6">
+  <h2 class="sec"><span class="n">6</span>つまずきポイントと、その解決の工夫</h2>
+  <p class="lead">Xのような大規模サイトを相手にすると、素朴に作ると必ずハマる落とし穴があります。X Tagger が実際に踏んで直したものを紹介します。</p>
+
+  <table>
+    <tr><th>問題</th><th>なぜ起きるか</th><th>解決の工夫</th></tr>
+    <tr>
+      <td>同じツイートを二重に数える</td>
+      <td>Xは表示を軽くするため、画面外に出たツイートの「入れ物」を別のツイートに<strong>使い回す</strong>(仮想スクロール)。</td>
+      <td>各ツイートの固有URL(<code>/status/…</code>)を目印に記録し、中身が入れ替わったかを見分けて二重カウントを防ぐ。</td>
+    </tr>
+    <tr>
+      <td>タブを2つ開くと集計が壊れる</td>
+      <td>複数タブが同時に金庫へ書き込み、片方が上書きされる。</td>
+      <td>書き込みは司令塔ひとりに集約し、順番待ちの列で1件ずつ処理。</td>
+    </tr>
+    <tr>
+      <td>リセットしたのに集計が復活する</td>
+      <td>古いタブが、リセット前に数えた分を後から送りつけてくる。</td>
+      <td>集計に<strong>「世代ID(revision)」</strong>を付け、リセットで世代を更新。古い世代からの報告は受け取らない。</td>
+    </tr>
+    <tr>
+      <td>タグを変えても古い集計が残る</td>
+      <td>「Python」の集計に、別条件のときの単語が混ざる。</td>
+      <td>タグの内容から<strong>「署名(signature)」</strong>を計算。署名が変わったら、そのセットの集計をやり直す。</td>
+    </tr>
+    <tr>
+      <td>スクロールが重い</td>
+      <td>単語を保存するたびに、表示中の全ツイートを再判定していた。</td>
+      <td>「初回か / 設定・タグ・自動タグが変わったとき」だけ全体を再判定し、単なるカウント保存では画面に触れないように分離。</td>
+    </tr>
+    <tr>
+      <td>拡張を更新するとエラーが出る</td>
+      <td>更新後もページに残った古いプログラムが、消えた本体を呼ぼうとする。</td>
+      <td>本体が無効になったのを検知したら、見張りやタイマーを静かに停止する。</td>
+    </tr>
+  </table>
+</section>
+
+<!-- 7 -->
+<section id="s7">
+  <h2 class="sec"><span class="n">7</span>ファイルの役割一覧</h2>
+  <table>
+    <tr><th>ファイル</th><th>住む場所</th><th>役割</th></tr>
+    <tr><td><code>manifest.json</code></td><td>—</td><td>設計図。名前・対象サイト・許可・使うファイルを宣言する。</td></tr>
+    <tr><td><code>content.js</code></td><td>Xのページの中</td><td>タイムライン監視、広告非表示、タグ付け、フィルタ、単語カウント。DOMを触る唯一の担当。</td></tr>
+    <tr><td><code>content.css</code></td><td>Xのページの中</td><td>チップの見た目、ハイライト、<code>xt-hidden</code>(非表示)などのルール。</td></tr>
+    <tr><td><code>background.js</code></td><td>ブラウザの裏(常駐)</td><td>集計の司令塔。報告を順番に処理し、セット別に保存、自動タグ昇格を判断。</td></tr>
+    <tr><td><code>statistics.js</code></td><td>共通の道具箱</td><td>単語の正規化、署名の計算、機能語リスト、司令塔への通信など共通ルール。</td></tr>
+    <tr><td><code>popup.html</code> / <code>popup.js</code></td><td>ツールバーの設定画面</td><td>タグ・セットの管理、頻出単語ランキング、設定、AI補助の操作。</td></tr>
+    <tr><td><code>tests/statistics.test.cjs</code></td><td>開発時のみ</td><td>集計・リセット・複数タブ・AIの挙動を自動検証するテスト(25件)。</td></tr>
+  </table>
+</section>
+
+<!-- 8 -->
+<section id="s8">
+  <h2 class="sec"><span class="n">8</span>安全性 — 何を「できない」ようにしているか</h2>
+  <p class="lead">拡張機能はページを書き換えられる強い力を持つ分、「何をしないか」も設計の大事な一部です。</p>
+  <ul>
+    <li><strong>外部にデータを送らない:</strong> タグ・設定・単語の集計は、すべて <code>chrome.storage</code>(あなたのパソコンの中)に保存されます。外部サーバーへの送信はありません。ツイートの本文が外に出ることもありません。</li>
+    <li><strong>AIもパソコンの中で完結:</strong> AI補助は Chrome に内蔵されたAI(Gemini Nano)を使い、<strong>モデルのダウンロード後は通信ゼロ</strong>。しかもAIに渡すのはタグ名や単語だけで、ツイート本文は渡しません。AIは提案するだけで、実際に設定を変えるかは常にあなたが決めます。</li>
+    <li><strong>動く範囲は x.com だけ:</strong> 設計図の <code>matches</code> で対象を x.com / twitter.com に限定しています。他のサイトでは一切起動しません。</li>
+    <li><strong>やっているのは「表示の組み替え」だけ:</strong> Xのサーバーやアカウントには手を触れません。あなたのブラウザに届いた表示を、あなたのために見やすく並べ替えているだけです。</li>
+  </ul>
+
+  <div class="warn">
+    <b>できないこと・限界:</b> これはPCのChrome用です(スマホのChromeは拡張機能非対応)。またXが大規模にデザインを変えると、目印(<code>data-testid</code>)がずれて動かなくなる可能性があります。その場合はコード側の目印を直す必要があります。
+  </div>
+</section>
+
+<footer>
+  X Tagger — Chrome 拡張機能の仕組み解説<br />
+  もっと詳しい機能仕様は <code>SPEC.md</code> / <code>spec.html</code> を参照してください。
+</footer>
+
+</main>
+</body>
+</html>
