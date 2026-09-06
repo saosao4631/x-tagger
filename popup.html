@@ -82,6 +82,24 @@
     .chip:hover { box-shadow: 0 1px 4px rgba(0, 0, 0, 0.14); transform: translateY(-1px); }
     .chip-user { background: var(--blue-bg); color: var(--blue); border: 1px solid var(--blue-border); }
     .chip-auto { background: #f5f5f5; color: var(--muted); border: 1px solid #d9d9d9; }
+    .chip-set { background: #fff; color: var(--muted); border: 1px solid var(--border); }
+    .chip-set-active {
+      background: var(--blue);
+      color: #fff;
+      border: 1px solid var(--blue);
+      box-shadow: 0 1px 4px rgba(29, 155, 240, 0.4);
+    }
+    .set-rename {
+      width: 100px;
+      border: none;
+      outline: none;
+      background: rgba(255, 255, 255, 0.95);
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 1px 6px;
+      color: var(--text);
+    }
     .chip-active { outline: 2px solid var(--blue); outline-offset: 1px; }
     .chip button {
       border: none;
@@ -275,6 +293,15 @@
   <div class="header">
     <h1>X Tagger</h1>
     <p>タイムラインにタグを付けて整理する</p>
+  </div>
+
+  <div class="card">
+    <h2>タグセット <span class="hint">クリックで切り替え / ダブルクリックで名前変更</span></h2>
+    <div id="sets" class="chips"></div>
+    <div class="add-row">
+      <input id="new-set" type="text" placeholder="新しいセット名..." />
+      <button id="add-set-btn">作成</button>
+    </div>
   </div>
 
   <div class="card">

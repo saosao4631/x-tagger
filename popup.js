@@ -4,6 +4,9 @@
 
 const DEFAULTS = {
   keywords: [],
+  // タグセット: [{ name, keywords }] 。activeSet のセットが現在の keywords と同期する
+  tagSets: [],
+  activeSet: "",
   autoKeywords: [],
   ignoredWords: [],
   wordCounts: {},
@@ -32,6 +35,112 @@ function save(keys) {
   const patch = {};
   for (const k of keys) patch[k] = data[k];
   chrome.storage.local.set(patch);
+}
+
+// タグの変更は必ずアクティブセットにも書き戻す(保存し忘れ防止)
+function saveKeywords() {
+  const set = data.tagSets.find((s) => s.name === data.activeSet);
+  if (set) set.keywords = data.keywords;
+  save(["keywords", "tagSets"]);
+}
+
+function switchSet(name) {
+  const set = data.tagSets.find((s) => s.name === name);
+  if (!set) return;
+  data.activeSet = name;
+  data.keywords = structuredClone(set.keywords);
+  save(["keywords", "activeSet"]);
+  closeEditor();
+}
+
+function addSet(name) {
+  if (!name || data.tagSets.some((s) => s.name === name)) return;
+  data.tagSets.push({ name, keywords: [] });
+  save(["tagSets"]);
+  switchSet(name); // 新しいセットは空の状態で即アクティブに
+}
+
+function deleteSet(name) {
+  const i = data.tagSets.findIndex((s) => s.name === name);
+  if (i === -1) return;
+  if (!confirm(`セット「${name}」を削除しますか?(中のタグも消えます)`)) return;
+  data.tagSets.splice(i, 1);
+  if (data.tagSets.length === 0) {
+    data.tagSets.push({ name: "セット1", keywords: [] });
+  }
+  save(["tagSets"]);
+  if (data.activeSet === name) {
+    switchSet(data.tagSets[0].name);
+  } else {
+    render();
+  }
+}
+
+// セットのチップ。クリック=切り替え、ダブルクリック=名前のインライン編集。
+// シングルクリックは少し待ってから実行し、ダブルクリックだったら取り消す
+function makeSetChip(set) {
+  const isActive = set.name === data.activeSet;
+  const chip = document.createElement("span");
+  chip.className = "chip " + (isActive ? "chip-set-active" : "chip-set");
+
+  const label = document.createElement("span");
+  label.textContent = `${set.name} (${set.keywords.length})`;
+  label.style.cursor = "pointer";
+  label.title = "クリックで切り替え / ダブルクリックで名前変更";
+
+  let clickTimer = null;
+  label.addEventListener("click", () => {
+    clearTimeout(clickTimer);
+    clickTimer = setTimeout(() => {
+      if (set.name !== data.activeSet) switchSet(set.name);
+    }, 250);
+  });
+  label.addEventListener("dblclick", () => {
+    clearTimeout(clickTimer);
+    startRenameSet(chip, label, set);
+  });
+
+  const btn = document.createElement("button");
+  btn.textContent = "×";
+  btn.title = "削除";
+  btn.addEventListener("click", () => deleteSet(set.name));
+
+  chip.append(label, btn);
+  return chip;
+}
+
+function startRenameSet(chip, label, set) {
+  const input = document.createElement("input");
+  input.className = "set-rename";
+  input.value = set.name;
+  chip.replaceChild(input, label);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const commit = () => {
+    if (done) return;
+    done = true;
+    const newName = input.value.trim();
+    const valid =
+      newName &&
+      newName !== set.name &&
+      !data.tagSets.some((s) => s.name === newName);
+    if (valid) {
+      if (data.activeSet === set.name) data.activeSet = newName;
+      set.name = newName;
+      save(["tagSets", "activeSet"]);
+    }
+    render();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") commit();
+    if (e.key === "Escape") {
+      done = true;
+      render();
+    }
+  });
+  input.addEventListener("blur", commit);
 }
 
 function splitWords(value) {
@@ -93,7 +202,7 @@ $("edit-save").addEventListener("click", () => {
     words: [...new Set([label, ...synonyms])],
     excludes: splitWords($("edit-excludes").value),
   };
-  save(["keywords"]);
+  saveKeywords();
   closeEditor();
 });
 
@@ -102,6 +211,11 @@ $("edit-cancel").addEventListener("click", closeEditor);
 // ------------------------------------------------------------------- 描画
 
 function render() {
+  // タグセット(アクティブなものは青塗り)
+  const setsBox = $("sets");
+  setsBox.textContent = "";
+  data.tagSets.forEach((set) => setsBox.appendChild(makeSetChip(set)));
+
   // ユーザータグ
   const kwBox = $("keywords");
   kwBox.textContent = "";
@@ -118,7 +232,7 @@ function render() {
         onClick: () => openEditor(i),
         onRemove: () => {
           data.keywords.splice(i, 1);
-          save(["keywords"]);
+          saveKeywords();
           if (editingIndex === i) closeEditor();
           else render();
         },
@@ -178,7 +292,7 @@ function render() {
     btn.textContent = "＋ タグに追加";
     btn.addEventListener("click", () => {
       data.keywords.push({ label: word, words: [word], excludes: [] });
-      save(["keywords"]);
+      saveKeywords();
       render();
     });
     row.append(left, btn);
@@ -198,11 +312,22 @@ function addKeyword() {
   if (!word) return;
   if (!data.keywords.some((t) => t.label === word)) {
     data.keywords.push({ label: word, words: [word], excludes: [] });
-    save(["keywords"]);
+    saveKeywords();
   }
   input.value = "";
   render();
 }
+
+function addSetFromInput() {
+  const input = $("new-set");
+  addSet(input.value.trim());
+  input.value = "";
+}
+
+$("add-set-btn").addEventListener("click", addSetFromInput);
+$("new-set").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") addSetFromInput();
+});
 
 $("add-btn").addEventListener("click", addKeyword);
 $("new-keyword").addEventListener("keydown", (e) => {
@@ -239,5 +364,20 @@ chrome.storage.local.get(DEFAULTS, (stored) => {
   data = stored;
   data.keywords = migrateTags(stored.keywords);
   data.settings = { ...DEFAULTS.settings, ...stored.settings };
+
+  // 初回起動やセット未作成時: 現在のタグを「セット1」として引き継ぐ
+  if (!data.tagSets || data.tagSets.length === 0) {
+    data.tagSets = [{ name: "セット1", keywords: data.keywords }];
+    data.activeSet = "セット1";
+    save(["tagSets", "activeSet"]);
+  } else {
+    data.tagSets = data.tagSets.map((s) => ({
+      ...s,
+      keywords: migrateTags(s.keywords),
+    }));
+    if (!data.tagSets.some((s) => s.name === data.activeSet)) {
+      data.activeSet = data.tagSets[0].name;
+    }
+  }
   render();
 });
