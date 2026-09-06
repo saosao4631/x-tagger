@@ -14,7 +14,8 @@ const FLUSH_INTERVAL_MS = 15000;
 const state = structuredClone(DEFAULTS);
 let statisticsScope = null;
 let pendingCounts = Object.create(null);
-let ready = false;
+let ready = false;      // 読み込み中はツイート処理を止める一時ゲート
+let loaded = false;     // 一度でも集計を読み込めたか(初回だけ全再判定する用)
 let refreshSerial = 0;
 let stopped = false;
 
@@ -32,9 +33,6 @@ const STOPWORDS = new Set([
   "ので", "でも", "そして", "しかし", "やっぱり", "ほんと", "本当",
   "今日", "明日", "昨日", "自分", "感じ", "気持ち", "みたい", "思う",
   "思い", "見て", "見た", "行く", "行った", "来た", "言う", "言って",
-  // 英語
-  "the", "and", "for", "you", "this", "that", "with", "are", "was",
-  "not", "have", "has", "just", "like", "will", "can", "all", "get",
   // URL断片など
   "https", "http", "www", "com", "co", "jp", "amp",
 ]);
@@ -117,7 +115,7 @@ function countWords(rawText) {
     // 絵文字・記号を含む語は除外(絵文字はUTF-16で2文字扱いになり
     // 長さフィルタをすり抜けるため、明示的に弾く)
     if (/[\p{Extended_Pictographic}\p{S}\uFE0F\u200D]/u.test(w)) continue;
-    if (STOPWORDS.has(w)) continue;
+    if (STOPWORDS.has(w) || XTaggerStatistics.isEnglishStopword(w)) continue;
     // 名詞だけを数えたい。形態素解析なしで品詞は分からないが、
     // 日本語の動詞・形容詞・助詞はほぼ必ずひらがなを含むため、
     // ひらがなを含む語を除外すると残りはほぼ名詞になる
@@ -312,16 +310,39 @@ function reprocessAll() {
 
 // ------------------------------------------------------------------- 監視
 
+// Xの更新は投稿以外のDOM変更も非常に多い。以前は変更のたびに全投稿を走査して
+// いたが、影響を受けたarticleだけをフレーム単位でまとめて処理する。
+const pendingArticles = new Set();
 let scheduledFrame = null;
-const observer = new MutationObserver(() => {
-  // 変更が連発するのでフレーム単位でまとめて処理
-  if (stopIfInvalidated() || scheduledFrame !== null) return;
+
+function addArticle(article) {
+  if (article?.matches?.('article[data-testid="tweet"]')) pendingArticles.add(article);
+}
+
+function collectAffectedArticles(node) {
+  if (!(node instanceof Element)) return;
+  addArticle(node);
+  addArticle(node.closest?.('article[data-testid="tweet"]'));
+  node.querySelectorAll?.('article[data-testid="tweet"]').forEach(addArticle);
+}
+
+function scheduleAffectedArticles(records = []) {
+  if (stopIfInvalidated()) return;
+  for (const record of records) {
+    collectAffectedArticles(record.target);
+    record.addedNodes.forEach(collectAffectedArticles);
+  }
+  if (pendingArticles.size === 0 || scheduledFrame !== null) return;
   scheduledFrame = requestAnimationFrame(() => {
     scheduledFrame = null;
     if (stopIfInvalidated()) return;
-    scan(document);
+    const articles = [...pendingArticles];
+    pendingArticles.clear();
+    articles.forEach(processTweet);
   });
-});
+}
+
+const observer = new MutationObserver(scheduleAffectedArticles);
 
 // --------------------------------------------------------------------- 起動
 
@@ -335,6 +356,8 @@ async function refreshState() {
     const snapshot = await XTaggerStatistics.request("get");
     if (stopIfInvalidated() || serial !== refreshSerial) return;
     const previous = statisticsScope;
+    const previousAutoKeywords = state.autoKeywords;
+    const previousSettings = state.settings;
     statisticsScope = snapshot.scope;
     if (!XTaggerStatistics.sameScope(previous, statisticsScope)) {
       const key = `${statisticsScope.setId}:${statisticsScope.revision}`;
@@ -346,11 +369,24 @@ async function refreshState() {
       if (countedByScope.size > 50) countedByScope.delete(countedByScope.keys().next().value);
       pendingCounts = Object.create(null);
     }
+    const scopeChanged = !XTaggerStatistics.sameScope(previous, statisticsScope);
+    const autoKeywordsChanged = JSON.stringify(previousAutoKeywords) !==
+      JSON.stringify(snapshot.stats.autoKeywords);
+    const settingsChanged = JSON.stringify(previousSettings) !==
+      JSON.stringify(snapshot.config.settings);
     Object.assign(state, snapshot.config, snapshot.stats);
     state.keywords = migrateTags(state.keywords);
-    compileMatchers();
+    if (scopeChanged || autoKeywordsChanged) compileMatchers();
     ready = true;
-    reprocessAll();
+    // カウントだけの保存では画面表示の条件が変わらないため、全投稿を触らない。
+    // 初回ロード、または設定・セット・自動タグが変わったときだけ再判定する。
+    // 初回判定は永続フラグ loaded で行う。ready を使うと、flushCounts の
+    // 再入で ready が一時的に false になったときに誤って全再判定してしまう。
+    const firstLoad = !loaded;
+    loaded = true;
+    if (firstLoad || scopeChanged || autoKeywordsChanged || settingsChanged) {
+      reprocessAll();
+    }
   } catch (error) {
     if (!stopIfInvalidated(error)) console.warn("X Tagger: 集計の読み込みに失敗しました", error);
   }

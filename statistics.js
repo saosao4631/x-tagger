@@ -5,6 +5,15 @@ const XTaggerStatistics = (() => {
     settings: { hidePromoted: true, autoEnabled: true, autoThreshold: 20, filterMode: false },
   };
   const normalize = (word) => word.normalize("NFKC").toLowerCase().trim();
+  // 短さではなく機能語として除外する。AI/UI/IT/OS/DB/JS/TS/Goなどは含めない。
+  const englishStopwords = new Set([
+    "a", "an", "the", "of", "at", "to", "in", "on", "by", "as", "for", "from", "with",
+    "and", "or", "but", "if", "then", "than", "this", "that", "these", "those",
+    "am", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "not", "you", "your", "we", "our", "they", "their",
+    "just", "like", "will", "would", "can", "could", "should", "all", "get",
+  ]);
+  const isEnglishStopword = (word) => englishStopwords.has(normalize(word));
   const migrateTags = (tags) => (tags ?? []).map((tag) =>
     typeof tag === "string" ? { label: tag, words: [tag], excludes: [] } : tag
   );
@@ -22,5 +31,5 @@ const XTaggerStatistics = (() => {
     if (!result?.ok) throw new Error(result?.error ?? "集計データを読み書きできませんでした");
     return result;
   }
-  return { defaults, normalize, migrateTags, signature, key, sameScope, request };
+  return { defaults, normalize, isEnglishStopword, migrateTags, signature, key, sameScope, request };
 })();

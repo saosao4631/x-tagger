@@ -137,6 +137,9 @@ class Element {
       : selector.split(".").filter(Boolean).every((name) => element.classList.contains(name));
     return this.children.flatMap((child) => [ ...(matches(child) ? [child] : []), ...child.querySelectorAll(selector) ]);
   }
+  matches(selector) {
+    return selector === 'article[data-testid="tweet"]' && this.tagName === "article";
+  }
   focus() {}
   select() {}
   remove() {}
@@ -153,15 +156,23 @@ class Document extends Element {
 function popup(env, prompt = async () => '{"noise":["django","flask","not-in-ranking"]}') {
   const document = new Document();
   const elements = {};
+  const ai = { created: [], destroyed: [] };
   for (const match of source("popup.html").matchAll(/<([a-z0-9]+)[^>]*\bid="([^"]+)"/g)) {
     elements[match[2]] = document.appendChild(new Element(match[1]));
   }
   document.getElementById = (id) => elements[id];
   const context = env.context({ document, setTimeout, clearTimeout, confirm: () => true,
-    LanguageModel: { availability: async () => "available", create: async () => ({ prompt }) },
+    LanguageModel: {
+      availability: async () => "available",
+      create: async (options) => {
+        const session = { prompt, destroy() { ai.destroyed.push(session); } };
+        ai.created.push({ options, session });
+        return session;
+      },
+    },
   });
   vm.runInContext(source("popup.js"), context);
-  return { context, elements };
+  return { context, elements, ai };
 }
 
 function content(env, overrides = {}) {
@@ -413,7 +424,8 @@ test("an invalidated API getter stops timers, observers and queued callbacks wit
   } };
   const tab = content(env, { chrome });
   await env.settle();
-  tab.lifecycle.mutation();
+  const tweet = tab.addTweet(1, "Python Django");
+  tab.lifecycle.mutation([{ target: tweet, addedNodes: [] }]);
   const queuedFrame = tab.lifecycle.frame;
   invalidated = true;
   assert.doesNotThrow(tab.lifecycle.timer);
@@ -607,4 +619,114 @@ test("registering a frequent word also includes previously filtered posts withou
   const current = await env.request("get");
   assert.ok(current.config.keywords.some((tag) => tag.label === "django"));
   assert.equal(current.stats.wordCounts.celery, 1);
+});
+
+test("DOM updates process only changed posts instead of rescanning the timeline", async () => {
+  const env = environment();
+  const tab = content(env);
+  await env.settle();
+  const articles = Array.from({ length: 80 }, (_, index) => tab.addTweet(index + 1, "Python Django"));
+  const reads = new Map();
+  for (const article of articles) {
+    const original = article.querySelector;
+    article.querySelector = (selector) => {
+      if (selector.includes("/status/")) reads.set(article, (reads.get(article) ?? 0) + 1);
+      return original(selector);
+    };
+  }
+  const target = articles[31];
+  tab.lifecycle.mutation([{ target, addedNodes: [] }]);
+  tab.lifecycle.frame();
+  assert.equal(reads.get(target), 1);
+  assert.equal([...reads.values()].reduce((sum, count) => sum + count, 0), 1);
+});
+
+test("word-count saves do not rerender every visible post, but an automatic tag does", async () => {
+  const initial = legacy();
+  initial.settings.autoThreshold = 99;
+  const env = environment(initial);
+  const tab = content(env);
+  await env.settle();
+  const articles = Array.from({ length: 30 }, (_, index) => tab.addTweet(index + 1, "Python Django"));
+  const { scope } = await env.request("get");
+  let reads = 0;
+  for (const article of articles) {
+    const original = article.querySelector;
+    article.querySelector = (selector) => {
+      if (selector.includes("/status/")) reads++;
+      return original(selector);
+    };
+  }
+  await env.request("count", { scope, counts: { django: 1 } });
+  await env.settle();
+  assert.equal(reads, 0);
+
+  const storedSettings = { ...env.stored.settings, autoThreshold: 1 };
+  await env.chrome.storage.local.set({ settings: storedSettings });
+  await env.request("count", { scope, counts: { django: 1 } });
+  await env.settle();
+  assert.ok(reads >= articles.length);
+});
+
+test("English function words are excluded without discarding meaningful short technology terms", async () => {
+  const env = environment();
+  const tab = content(env);
+  await env.settle();
+  tab.addTweet(1, "Python of at to in on by an is AI UI UX IT OS DB JS TS Go figma issue md plus");
+  await tab.flush();
+  const current = await env.request("get");
+  for (const word of ["of", "at", "to", "in", "on", "by", "an", "is"]) {
+    assert.equal(current.stats.wordCounts[word], undefined, word);
+  }
+  for (const word of ["ai", "ui", "ux", "it", "os", "db", "js", "ts", "go", "figma", "issue", "md", "plus"]) {
+    assert.equal(current.stats.wordCounts[word], 1, word);
+  }
+  // 古いタブが機能語を送り続けても、保存・再昇格しない。
+  await env.request("count", { scope: current.scope, counts: { OF: 99, at: 99, to: 99 } });
+  const after = await env.request("get");
+  assert.deepEqual(after.stats.wordCounts, current.stats.wordCounts);
+  assert.deepEqual(after.stats.autoKeywords, []);
+});
+
+test("existing stopword counts and automatic tags are cleaned without resetting useful data", async () => {
+  const initial = legacy();
+  initial.tagSets[0].keywords.push(...tags("of"));
+  const env = environment(initial);
+  const current = await env.request("get");
+  await env.chrome.storage.local.set({ [`statistics:${current.scope.setId}`]: {
+    ...current.stats,
+    wordCounts: { of: 12, at: 3, to: 2, ai: 4, ui: 3, it: 2, figma: 2 },
+    autoKeywords: ["of", "ai"],
+  } });
+  const cleaned = await env.request("get");
+  assert.deepEqual(cleaned.stats.wordCounts, { ai: 4, ui: 3, it: 2, figma: 2 });
+  assert.deepEqual(cleaned.stats.autoKeywords, ["ai"]);
+  assert.deepEqual(cleaned.scope, current.scope);
+  assert.deepEqual(cleaned.stats.ignoredWords, current.stats.ignoredWords);
+  assert.ok(cleaned.config.keywords.some((tag) => tag.label === "of"));
+});
+
+test("noise classification receives tag context and constrained candidates in fresh sessions", async () => {
+  const env = environment();
+  const { scope } = await env.request("get");
+  await env.request("count", { scope, counts: { figma: 1, issue: 1, md: 1, plus: 1 } });
+  const prompts = [];
+  const ui = popup(env, async (input, options) => {
+    prompts.push({ input: JSON.parse(input), schema: clone(options.responseConstraint) });
+    return '{"noise":[]}';
+  });
+  await env.settle();
+  await vm.runInContext('getAiSession($("ai-status"))', ui.context); // 同義語生成用の履歴とは分離
+  await ui.elements["ai-clean"].fire();
+  await ui.elements["ai-clean"].fire();
+  assert.equal(ui.ai.created.length, 3);
+  assert.deepEqual(ui.ai.destroyed, ui.ai.created.slice(1).map(({ session }) => session));
+  assert.equal(ui.ai.created[1].options.initialPrompts[0].role, "system");
+  assert.deepEqual(prompts[0].input.tags, [{ label: "Python", words: ["Python"] }]);
+  assert.deepEqual(prompts[0].input.candidates, [
+    { word: "figma", count: 1 }, { word: "issue", count: 1 },
+    { word: "md", count: 1 }, { word: "plus", count: 1 },
+  ]);
+  assert.deepEqual(prompts[0].schema.properties.noise.items.enum, ["figma", "issue", "md", "plus"]);
+  assert.deepEqual((await env.request("get")).stats.ignoredWords, ["noise"]);
 });

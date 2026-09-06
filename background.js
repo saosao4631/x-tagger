@@ -44,6 +44,15 @@ async function getStatistics(set) {
   if (!stats || stats.signature !== Stats.signature(set.keywords)) {
     stats = emptyStatistics(set, stats?.ignoredWords ?? []);
     await chrome.storage.local.set({ [key]: stats });
+  } else {
+    // 以前に数えた英語の機能語を掃除する。登録タグや他の集計は保持する。
+    const words = Object.entries(stats.wordCounts).filter(([word]) => !Stats.isEnglishStopword(word));
+    const autoKeywords = stats.autoKeywords.filter((word) => !Stats.isEnglishStopword(word));
+    if (words.length !== Object.keys(stats.wordCounts).length || autoKeywords.length !== stats.autoKeywords.length) {
+      stats.wordCounts = Object.fromEntries(words);
+      stats.autoKeywords = autoKeywords;
+      await chrome.storage.local.set({ [key]: stats });
+    }
   }
   return stats;
 }
@@ -82,7 +91,7 @@ async function handle(message) {
   }
   if (message.type === "statistics:count") {
     for (const [word, count] of Object.entries(message.counts ?? {})) {
-      if (!Number.isSafeInteger(count) || count <= 0 || word.length < 2 ||
+      if (!Number.isSafeInteger(count) || count <= 0 || word.length < 2 || Stats.isEnglishStopword(word) ||
           /[\p{Extended_Pictographic}\p{S}\uFE0F\u200D]/u.test(word)) continue;
       const previous = Object.hasOwn(stats.wordCounts, word) ? stats.wordCounts[word] : 0;
       Object.defineProperty(stats.wordCounts, word, {
