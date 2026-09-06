@@ -5,25 +5,17 @@
 //   3. 頻出単語の集計と、しきい値超えの単語の自動タグ化
 
 const DEFAULTS = {
-  // タグ: { label: 表示名, words: [同義語(labelを含む)], excludes: [除外語] }
-  keywords: [],
-  autoKeywords: [],    // 頻出により自動昇格した単語(プレーン文字列)
-  ignoredWords: [],    // 自動昇格させたくない単語
-  wordCounts: {},      // 単語 -> 出現回数
-  settings: {
-    hidePromoted: true,
-    autoEnabled: true,
-    autoThreshold: 20, // この回数以上出現したら自動タグ化
-    filterMode: false, // ホームTLでタグに一致しないツイートを非表示にする
-  },
+  ...XTaggerStatistics.defaults,
+  autoKeywords: [],
 };
 
-const AUTO_KEYWORD_MAX = 20; // 自動タグの上限
-const WORD_COUNT_MAX = 500;  // 保存する単語数の上限(多い順に残す)
 const FLUSH_INTERVAL_MS = 15000;
 
 const state = structuredClone(DEFAULTS);
-let dirty = false;
+let statisticsScope = null;
+let pendingCounts = Object.create(null);
+let ready = false;
+let refreshSerial = 0;
 
 // ---------------------------------------------------------------- 単語分割
 
@@ -121,14 +113,16 @@ function countWords(rawText) {
     const w = normalize(segment);
     if (w.length < 2) continue;
     if (/^[\d\s\p{P}]+$/u.test(w)) continue;
+    // 絵文字・記号を含む語は除外(絵文字はUTF-16で2文字扱いになり
+    // 長さフィルタをすり抜けるため、明示的に弾く)
+    if (/[\p{Extended_Pictographic}\p{S}\uFE0F\u200D]/u.test(w)) continue;
     if (STOPWORDS.has(w)) continue;
     // 名詞だけを数えたい。形態素解析なしで品詞は分からないが、
     // 日本語の動詞・形容詞・助詞はほぼ必ずひらがなを含むため、
     // ひらがなを含む語を除外すると残りはほぼ名詞になる
     // (漢字・カタカナ・英数字のみの語だけを集計する)
     if (/[぀-ゟ]/.test(w)) continue;
-    state.wordCounts[w] = (state.wordCounts[w] || 0) + 1;
-    dirty = true;
+    pendingCounts[w] = (pendingCounts[w] || 0) + 1;
   }
 }
 
@@ -146,58 +140,38 @@ function shutdown() {
   clearInterval(flushTimer);
 }
 
-function flushCounts() {
+async function flushCounts() {
   if (!extensionAlive()) {
     shutdown();
     return;
   }
-  if (!dirty) return;
-  dirty = false;
-
-  // 上限を超えたら出現回数の多い順に切り詰める
-  const entries = Object.entries(state.wordCounts);
-  if (entries.length > WORD_COUNT_MAX) {
-    entries.sort((a, b) => b[1] - a[1]);
-    state.wordCounts = Object.fromEntries(entries.slice(0, WORD_COUNT_MAX));
-  }
-
-  if (state.settings.autoEnabled) {
-    promoteFrequentWords();
-    compileMatchers();
-  }
-
+  if (!statisticsScope || Object.keys(pendingCounts).length === 0) return;
+  const scope = statisticsScope;
+  const counts = pendingCounts;
+  pendingCounts = Object.create(null);
   try {
-    chrome.storage.local.set({
-      wordCounts: state.wordCounts,
-      autoKeywords: state.autoKeywords,
-    });
+    await XTaggerStatistics.request("count", { scope, counts });
   } catch {
-    shutdown();
+    if (!extensionAlive()) shutdown();
+    else if (XTaggerStatistics.sameScope(scope, statisticsScope)) {
+      for (const [word, count] of Object.entries(counts)) {
+        pendingCounts[word] = (pendingCounts[word] || 0) + count;
+      }
+    }
   }
 }
 
-function promoteFrequentWords() {
-  const existing = allTagWords();
-  for (const w of [...state.autoKeywords, ...state.ignoredWords]) {
-    existing.add(normalize(w));
-  }
-  const candidates = Object.entries(state.wordCounts)
-    .filter(([w, c]) => c >= state.settings.autoThreshold && !existing.has(w))
-    .sort((a, b) => b[1] - a[1]);
-
-  for (const [word] of candidates) {
-    if (state.autoKeywords.length >= AUTO_KEYWORD_MAX) break;
-    state.autoKeywords.push(word);
-  }
-}
-
-const flushTimer = setInterval(flushCounts, FLUSH_INTERVAL_MS);
+const flushTimer = setInterval(() => {
+  if (ready) flushCounts();
+  else refreshState();
+}, FLUSH_INTERVAL_MS);
 
 // ------------------------------------------------------------ ツイート処理
 
 // 単語カウント済みツイートのID。仮想スクロールで同じツイートが再描画されても
 // 二重カウントしないためのセット(セッション内のみ有効)
-const countedTweetIds = new Set();
+let countedTweetIds = new Set();
+const countedByScope = new Map();
 const COUNTED_IDS_MAX = 5000;
 
 function isHomeTimeline() {
@@ -227,6 +201,7 @@ function makeChip(label, kind) {
 }
 
 function processTweet(article) {
+  if (!ready) return;
   // 仮想スクロールでDOMノードが使い回されるため、ツイートの固有URLで
   // 「同じノードだが中身が変わった」ケースを検出して再処理する
   const link =
@@ -239,7 +214,7 @@ function processTweet(article) {
   article.querySelectorAll(".xt-chips").forEach((el) => el.remove());
   article.classList.remove("xt-hit");
   const cell = article.closest('[data-testid="cellInnerDiv"]');
-  if (cell) cell.classList.remove("xt-hidden");
+  (cell ?? article).classList.remove("xt-hidden");
 
   if (state.settings.hidePromoted && isPromoted(article)) {
     (cell ?? article).classList.add("xt-hidden");
@@ -251,13 +226,6 @@ function processTweet(article) {
   const textEl = article.querySelector('[data-testid="tweetText"]');
   const rawText = textEl ? textEl.innerText : "";
   const text = normalize(rawText);
-
-  // 単語集計はツイートIDごとに1回だけ(再描画・スクロール往復で重複させない)
-  if (rawText && link && !countedTweetIds.has(link)) {
-    countedTweetIds.add(link);
-    if (countedTweetIds.size > COUNTED_IDS_MAX) countedTweetIds.clear();
-    countWords(rawText);
-  }
 
   // 同義語のどれにヒットしてもチップはタグの表示名1つだけ
   const hitTags = compiledTags.filter((tag) => tagMatches(tag, text));
@@ -276,6 +244,19 @@ function processTweet(article) {
   ) {
     (cell ?? article).classList.add("xt-hidden");
     return;
+  }
+
+  // 単語集計は「設定したタグにヒットしたツイート」だけを対象にする。
+  // 登録タグに関連する話題の中で他に何が頻出しているか(共起語)を見るため、
+  // タグと無関係なツイートの単語はランキングに混ぜない。
+  // → タグを1つも登録していないうちは頻出単語は集計されない。
+  // ツイートIDごとに1回だけ数える(再描画・スクロール往復で重複させない)
+  if (hitTags.length > 0 && rawText && link && !countedTweetIds.has(link)) {
+    countedTweetIds.add(link);
+    if (countedTweetIds.size > COUNTED_IDS_MAX) {
+      countedTweetIds.delete(countedTweetIds.values().next().value);
+    }
+    countWords(rawText);
   }
 
   if (hitTags.length > 0 || autoHits.length > 0) {
@@ -318,30 +299,45 @@ const observer = new MutationObserver(() => {
 
 // --------------------------------------------------------------------- 起動
 
-chrome.storage.local.get(DEFAULTS, (stored) => {
-  Object.assign(state, stored);
-  state.keywords = migrateTags(stored.keywords);
-  state.settings = { ...DEFAULTS.settings, ...stored.settings };
-  compileMatchers();
-  scan(document);
-  observer.observe(document.body, { childList: true, subtree: true });
-});
+async function refreshState() {
+  const serial = ++refreshSerial;
+  ready = false;
+  await flushCounts();
+  try {
+    const snapshot = await XTaggerStatistics.request("get");
+    if (serial !== refreshSerial) return;
+    const previous = statisticsScope;
+    statisticsScope = snapshot.scope;
+    if (!XTaggerStatistics.sameScope(previous, statisticsScope)) {
+      const key = `${statisticsScope.setId}:${statisticsScope.revision}`;
+      // リセット直後は処理済み投稿を数え直さず、新しい投稿から再開する。
+      const wasReset = previous?.setId === statisticsScope.setId &&
+        previous.signature === statisticsScope.signature;
+      countedTweetIds = countedByScope.get(key) ?? new Set(wasReset ? countedTweetIds : []);
+      countedByScope.set(key, countedTweetIds);
+      if (countedByScope.size > 50) countedByScope.delete(countedByScope.keys().next().value);
+      pendingCounts = Object.create(null);
+    }
+    Object.assign(state, snapshot.config, snapshot.stats);
+    state.keywords = migrateTags(state.keywords);
+    compileMatchers();
+    ready = true;
+    reprocessAll();
+  } catch (error) {
+    if (!extensionAlive()) shutdown();
+    else console.warn("X Tagger: 集計の読み込みに失敗しました", error);
+  }
+}
 
 // ポップアップで設定が変わったら即反映
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
-  let needsReprocess = false;
-  for (const [key, { newValue }] of Object.entries(changes)) {
-    if (key === "wordCounts") continue; // 自分で書いた集計のエコーは無視
-    state[key] = newValue ?? structuredClone(DEFAULTS[key]);
-    if (key === "keywords") state.keywords = migrateTags(state.keywords);
-    if (key === "settings") state.settings = { ...DEFAULTS.settings, ...state.settings };
-    if (["keywords", "autoKeywords", "settings", "ignoredWords"].includes(key)) {
-      needsReprocess = true;
-    }
-  }
-  if (needsReprocess) {
-    compileMatchers();
-    reprocessAll();
+  if (Object.keys(changes).some((key) =>
+    ["keywords", "tagSets", "activeSet", "settings", "statisticsVersion"].includes(key) ||
+    key === XTaggerStatistics.key(statisticsScope?.setId))) {
+    refreshState();
   }
 });
+
+observer.observe(document.body, { childList: true, subtree: true });
+refreshState();

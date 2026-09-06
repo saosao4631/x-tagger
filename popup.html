@@ -39,12 +39,8 @@
       margin: 0;
       font-size: 16px;
       letter-spacing: 0.3px;
-      display: flex;
-      align-items: center;
-      gap: 7px;
     }
-    .header h1::before { content: "🏷️"; font-size: 15px; }
-    .header p { margin: 3px 0 0 26px; font-size: 11px; opacity: 0.85; }
+    .header p { margin: 3px 0 0; font-size: 11px; opacity: 0.85; }
 
     /* ---- カード ---- */
     .card {
@@ -186,19 +182,54 @@
     }
     .editor-actions button.primary:hover { background: var(--blue-dark); }
 
+    /* ---- AI(Chrome内蔵 Gemini Nano) ---- */
+    .ai-btn {
+      display: block;
+      margin: 8px 0 4px;
+      padding: 5px 14px;
+      border-radius: 999px;
+      border: 1px solid #c4b5fd;
+      background: #f5f3ff;
+      color: #6d28d9;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+    .ai-btn:hover { background: #ede9fe; }
+    .ai-btn:disabled { opacity: 0.5; cursor: default; }
+    .ai-group { margin: 6px 0; }
+    .ai-label { display: block; font-size: 11px; font-weight: 700; color: #6d28d9; margin-bottom: 3px; }
+    .chip-cand {
+      background: #fff;
+      color: var(--muted);
+      border: 1px dashed #c4b5fd;
+      cursor: pointer;
+      padding: 3px 12px;
+    }
+    .chip-cand.selected {
+      background: #ede9fe;
+      color: #6d28d9;
+      border-style: solid;
+      font-weight: 700;
+    }
+
     /* ---- 頻出単語 ---- */
     .freq-list { display: flex; flex-direction: column; }
     .freq-row {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 8px;
       padding: 5px 6px;
       border-radius: 8px;
       transition: background 0.1s;
     }
     .freq-row:hover { background: var(--bg); }
-    .freq-word { font-weight: 600; }
+    .freq-info { display: flex; align-items: center; min-width: 0; }
+    .freq-word { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
     .freq-count {
+      flex-shrink: 0;
       color: var(--faint);
       font-size: 10px;
       margin-left: 7px;
@@ -207,7 +238,23 @@
       padding: 1px 7px;
     }
     .freq-row:hover .freq-count { background: #e3e9ed; }
+    .freq-remove {
+      flex-shrink: 0;
+      width: 24px;
+      height: 24px;
+      margin-left: 3px;
+      padding: 0;
+      border: none;
+      border-radius: 50%;
+      background: transparent;
+      color: var(--muted);
+      font-size: 16px;
+      cursor: pointer;
+    }
+    .freq-remove:hover { background: #fde8e8; color: #c0392b; }
+    .freq-remove:disabled { opacity: 0.5; cursor: default; }
     .freq-add {
+      flex-shrink: 0;
       border: 1px solid var(--blue);
       background: #fff;
       color: var(--blue);
@@ -325,6 +372,19 @@
         <label>除外語(これを含む部分は無視)</label>
         <input id="edit-excludes" type="text" placeholder="例: 猫背" />
       </div>
+      <button id="ai-suggest" class="ai-btn">AIで同義語・除外語の候補を出す</button>
+      <div id="ai-candidates" style="display: none">
+        <div class="ai-group">
+          <span class="ai-label">同義語候補</span>
+          <div id="ai-syn" class="chips"></div>
+        </div>
+        <div class="ai-group">
+          <span class="ai-label">除外語候補</span>
+          <div id="ai-exc" class="chips"></div>
+        </div>
+        <button id="ai-apply" class="ai-btn">選んだ候補を反映</button>
+      </div>
+      <div id="ai-status" class="hint"></div>
       <div class="editor-actions">
         <button id="edit-cancel">キャンセル</button>
         <button id="edit-save" class="primary">保存</button>
@@ -333,13 +393,26 @@
   </div>
 
   <div class="card">
-    <h2>自動タグ <span class="hint">頻出単語から自動で昇格</span></h2>
+    <h2>自動タグ <span class="hint">このセットの頻出単語から昇格</span></h2>
     <div id="auto-keywords" class="chips"></div>
   </div>
 
   <div class="card">
-    <h2>頻出単語 <span class="hint">タイムラインから集計</span></h2>
+    <h2>頻出単語 <span class="hint">このセットのタグに一致した投稿</span></h2>
+    <p class="hint">タグ・同義語・除外語を変えると集計を始め直します。</p>
     <div id="freq" class="freq-list"></div>
+    <button id="ai-clean" class="ai-btn">AIでノイズ候補を出す</button>
+    <div id="ai-noise-candidates" style="display: none">
+      <div class="ai-group">
+        <span class="ai-label">除外候補（選んだ語だけ確定）</span>
+        <div id="ai-noise-words" class="chips"></div>
+      </div>
+      <div class="editor-actions">
+        <button id="ai-noise-cancel">キャンセル</button>
+        <button id="ai-noise-apply" class="primary">選んだ語を除外</button>
+      </div>
+    </div>
+    <div id="ai-clean-status" class="hint"></div>
   </div>
 
   <div class="card">
@@ -360,9 +433,11 @@
       <span>自動タグ化のしきい値(回)</span>
       <input type="number" id="auto-threshold" min="2" />
     </div>
-    <button id="reset-counts" class="reset">頻出単語のカウントをリセット</button>
+    <button id="reset-counts" class="reset">このセットの集計・自動タグをリセット</button>
+    <div id="storage-status" class="hint" role="status"></div>
   </div>
 
+  <script src="statistics.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

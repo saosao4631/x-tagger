@@ -3,42 +3,35 @@
 // チップをクリックすると同義語・除外語を編集できる。
 
 const DEFAULTS = {
-  keywords: [],
-  // タグセット: [{ name, keywords }] 。activeSet のセットが現在の keywords と同期する
-  tagSets: [],
-  activeSet: "",
+  ...XTaggerStatistics.defaults,
   autoKeywords: [],
   ignoredWords: [],
   wordCounts: {},
-  settings: {
-    hidePromoted: true,
-    autoEnabled: true,
-    autoThreshold: 20,
-    filterMode: false,
-  },
 };
 
 const FREQ_DISPLAY_MAX = 15;
 
 let data = structuredClone(DEFAULTS);
 let editingIndex = null; // 編集中のタグの index。null なら編集パネル非表示
+let statisticsScope = null;
+let refreshSerial = 0;
+let noiseRequest = 0;
+let noiseScope = null;
+let suggestionRequest = 0;
+let initialized = false;
 
 const $ = (id) => document.getElementById(id);
-
-function migrateTags(keywords) {
-  return (keywords ?? []).map((k) =>
-    typeof k === "string" ? { label: k, words: [k], excludes: [] } : k
-  );
-}
+document.querySelectorAll("button, input").forEach((el) => { el.disabled = true; });
 
 function save(keys) {
   const patch = {};
   for (const k of keys) patch[k] = data[k];
-  chrome.storage.local.set(patch);
+  return chrome.storage.local.set(patch).then(refreshPopup).catch(showStorageError);
 }
 
 // タグの変更は必ずアクティブセットにも書き戻す(保存し忘れ防止)
 function saveKeywords() {
+  clearNoiseCandidates();
   const set = data.tagSets.find((s) => s.name === data.activeSet);
   if (set) set.keywords = data.keywords;
   save(["keywords", "tagSets"]);
@@ -47,6 +40,7 @@ function saveKeywords() {
 function switchSet(name) {
   const set = data.tagSets.find((s) => s.name === name);
   if (!set) return;
+  clearNoiseCandidates();
   data.activeSet = name;
   data.keywords = structuredClone(set.keywords);
   save(["keywords", "activeSet"]);
@@ -55,25 +49,29 @@ function switchSet(name) {
 
 function addSet(name) {
   if (!name || data.tagSets.some((s) => s.name === name)) return;
-  data.tagSets.push({ name, keywords: [] });
-  save(["tagSets"]);
-  switchSet(name); // 新しいセットは空の状態で即アクティブに
+  clearNoiseCandidates();
+  data.tagSets.push({ id: crypto.randomUUID(), name, keywords: [] });
+  data.activeSet = name;
+  data.keywords = [];
+  save(["tagSets", "activeSet", "keywords"]);
+  closeEditor();
 }
 
 function deleteSet(name) {
   const i = data.tagSets.findIndex((s) => s.name === name);
   if (i === -1) return;
   if (!confirm(`セット「${name}」を削除しますか?(中のタグも消えます)`)) return;
+  clearNoiseCandidates();
   data.tagSets.splice(i, 1);
   if (data.tagSets.length === 0) {
-    data.tagSets.push({ name: "セット1", keywords: [] });
+    data.tagSets.push({ id: crypto.randomUUID(), name: "セット1", keywords: [] });
   }
-  save(["tagSets"]);
   if (data.activeSet === name) {
-    switchSet(data.tagSets[0].name);
-  } else {
-    render();
+    data.activeSet = data.tagSets[0].name;
+    data.keywords = structuredClone(data.tagSets[0].keywords);
   }
+  save(["tagSets", "activeSet", "keywords"]);
+  closeEditor();
 }
 
 // セットのチップ。クリック=切り替え、ダブルクリック=名前のインライン編集。
@@ -174,6 +172,7 @@ function makeChip(word, kind, { onRemove, onClick, active } = {}) {
 // ------------------------------------------------------------ タグ編集パネル
 
 function openEditor(index) {
+  suggestionRequest++;
   editingIndex = index;
   const tag = data.keywords[index];
   $("edit-label").value = tag.label;
@@ -181,11 +180,14 @@ function openEditor(index) {
     .filter((w) => w !== tag.label)
     .join(", ");
   $("edit-excludes").value = (tag.excludes ?? []).join(", ");
+  $("ai-candidates").style.display = "none";
+  $("ai-status").textContent = "";
   $("editor").style.display = "block";
   render();
 }
 
 function closeEditor() {
+  suggestionRequest++;
   editingIndex = null;
   $("editor").style.display = "none";
   render();
@@ -207,6 +209,19 @@ $("edit-save").addEventListener("click", () => {
 });
 
 $("edit-cancel").addEventListener("click", closeEditor);
+
+// タグ・除外済みの語を除いた頻出単語の上位リスト
+function topFreqWords() {
+  const known = new Set([...data.autoKeywords, ...data.ignoredWords].map(XTaggerStatistics.normalize));
+  for (const tag of data.keywords) {
+    known.add(XTaggerStatistics.normalize(tag.label));
+    for (const w of tag.words ?? []) known.add(XTaggerStatistics.normalize(w));
+  }
+  return Object.entries(data.wordCounts)
+    .filter(([w]) => !known.has(w))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, FREQ_DISPLAY_MAX);
+}
 
 // ------------------------------------------------------------------- 描画
 
@@ -246,14 +261,14 @@ function render() {
   if (data.autoKeywords.length === 0) {
     autoBox.innerHTML = '<span class="empty">まだありません</span>';
   }
-  data.autoKeywords.forEach((word, i) => {
+  data.autoKeywords.forEach((word) => {
     autoBox.appendChild(
       makeChip(word, "auto", {
-        onRemove: () => {
-          data.autoKeywords.splice(i, 1);
-          if (!data.ignoredWords.includes(word)) data.ignoredWords.push(word);
-          save(["autoKeywords", "ignoredWords"]);
-          render();
+        onRemove: async () => {
+          try {
+            await XTaggerStatistics.request("ignore", { scope: statisticsScope, words: [word] });
+            await refreshPopup();
+          } catch (error) { showStorageError(error); }
         },
       })
     );
@@ -262,24 +277,19 @@ function render() {
   // 頻出単語ランキング
   const freqBox = $("freq");
   freqBox.textContent = "";
-  const known = new Set([...data.autoKeywords, ...data.ignoredWords]);
-  for (const tag of data.keywords) {
-    known.add(tag.label);
-    for (const w of tag.words ?? []) known.add(w);
-  }
-  const top = Object.entries(data.wordCounts)
-    .filter(([w]) => !known.has(w))
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, FREQ_DISPLAY_MAX);
+  const top = topFreqWords();
 
   if (top.length === 0) {
     freqBox.innerHTML =
-      '<span class="empty">x.com をスクロールすると集計されます</span>';
+      data.keywords.length
+        ? '<span class="empty">このセットのタグに一致した投稿から集計します</span>'
+        : '<span class="empty">タグを登録すると、関連する投稿から集計が始まります</span>';
   }
   for (const [word, count] of top) {
     const row = document.createElement("div");
     row.className = "freq-row";
     const left = document.createElement("span");
+    left.className = "freq-info";
     const w = document.createElement("span");
     w.className = "freq-word";
     w.textContent = word;
@@ -295,6 +305,25 @@ function render() {
       saveKeywords();
       render();
     });
+    const scope = statisticsScope;
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "freq-remove";
+    removeBtn.textContent = "×";
+    removeBtn.title = "このセットの頻出単語・自動タグから除外";
+    removeBtn.setAttribute("aria-label", `${word}を頻出単語から除外`);
+    removeBtn.addEventListener("click", async () => {
+      if (!XTaggerStatistics.sameScope(scope, statisticsScope)) return;
+      removeBtn.disabled = true;
+      btn.disabled = true;
+      try {
+        const result = await XTaggerStatistics.request("ignore", { scope, words: [word] });
+        await refreshPopup();
+        if (result.stale) showStorageError(new Error("集計が変更されました。もう一度除外してください"));
+      } catch (error) { showStorageError(error); }
+      finally { removeBtn.disabled = false; btn.disabled = false; }
+    });
+    left.appendChild(removeBtn);
     row.append(left, btn);
     freqBox.appendChild(row);
   }
@@ -354,30 +383,258 @@ $("auto-threshold").addEventListener("change", (e) => {
   }
 });
 
-$("reset-counts").addEventListener("click", () => {
-  data.wordCounts = {};
-  save(["wordCounts"]);
-  render();
-});
+// ---------------- AI 機能(Chrome内蔵 Gemini Nano / Prompt API) ----------------
+// Chrome 138+ で拡張機能から利用可能。APIキー不要・モデルDL後は外部通信なし。
+// 対応していないマシンでは AI ボタンを非表示にし、他の機能には影響させない。
 
-chrome.storage.local.get(DEFAULTS, (stored) => {
-  data = stored;
-  data.keywords = migrateTags(stored.keywords);
-  data.settings = { ...DEFAULTS.settings, ...stored.settings };
+let aiSession = null;
 
-  // 初回起動やセット未作成時: 現在のタグを「セット1」として引き継ぐ
-  if (!data.tagSets || data.tagSets.length === 0) {
-    data.tagSets = [{ name: "セット1", keywords: data.keywords }];
-    data.activeSet = "セット1";
-    save(["tagSets", "activeSet"]);
-  } else {
-    data.tagSets = data.tagSets.map((s) => ({
-      ...s,
-      keywords: migrateTags(s.keywords),
-    }));
-    if (!data.tagSets.some((s) => s.name === data.activeSet)) {
-      data.activeSet = data.tagSets[0].name;
-    }
+async function aiAvailability() {
+  if (typeof LanguageModel === "undefined") return "unavailable";
+  try {
+    return await LanguageModel.availability();
+  } catch {
+    return "unavailable";
   }
-  render();
+}
+
+async function getAiSession(statusEl) {
+  if (aiSession) return aiSession;
+  statusEl.textContent = "モデルを準備中...(初回は数GBのダウンロードが走ります)";
+  const monitor = (m) => {
+    m.addEventListener("downloadprogress", (e) => {
+      statusEl.textContent = `モデルをダウンロード中... ${Math.round(e.loaded * 100)}%`;
+    });
+  };
+  try {
+    aiSession = await LanguageModel.create({
+      expectedInputs: [{ type: "text", languages: ["ja", "en"] }],
+      expectedOutputs: [{ type: "text", languages: ["ja"] }],
+      monitor,
+    });
+  } catch {
+    // 言語指定オプション非対応のバージョン向けフォールバック
+    aiSession = await LanguageModel.create({ monitor });
+  }
+  return aiSession;
+}
+
+function makeCandidateChip(word) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "chip chip-cand";
+  chip.textContent = word;
+  chip.dataset.word = word;
+  chip.setAttribute("aria-pressed", "false");
+  chip.addEventListener("click", () => {
+    chip.setAttribute("aria-pressed", String(chip.classList.toggle("selected")));
+  });
+  return chip;
+}
+
+function renderAiCandidates(result, tag) {
+  const existing = new Set(
+    [tag.label, ...(tag.words ?? []), ...(tag.excludes ?? [])].map((w) =>
+      w.toLowerCase()
+    )
+  );
+  const clean = (list) =>
+    [...new Set((list ?? []).map((w) => String(w).trim()).filter(Boolean))].filter(
+      (w) => !existing.has(w.toLowerCase())
+    );
+
+  const synBox = $("ai-syn");
+  const excBox = $("ai-exc");
+  synBox.textContent = "";
+  excBox.textContent = "";
+  clean(result.synonyms).forEach((w) => synBox.appendChild(makeCandidateChip(w)));
+  clean(result.excludes).forEach((w) => excBox.appendChild(makeCandidateChip(w)));
+  if (!synBox.childElementCount) synBox.innerHTML = '<span class="empty">なし</span>';
+  if (!excBox.childElementCount) excBox.innerHTML = '<span class="empty">なし</span>';
+  $("ai-candidates").style.display = "block";
+}
+
+$("ai-suggest").addEventListener("click", async () => {
+  if (editingIndex === null) return;
+  const tag = data.keywords[editingIndex];
+  const status = $("ai-status");
+  const btn = $("ai-suggest");
+  const request = ++suggestionRequest;
+  btn.disabled = true;
+  try {
+    const session = await getAiSession(status);
+    status.textContent = "候補を考え中...";
+    const schema = {
+      type: "object",
+      properties: {
+        synonyms: { type: "array", items: { type: "string" }, maxItems: 8 },
+        excludes: { type: "array", items: { type: "string" }, maxItems: 8 },
+      },
+      required: ["synonyms", "excludes"],
+    };
+    const res = await session.prompt(
+      `「${tag.label}」というキーワードでSNS投稿を検索する設定を作っています。\n` +
+        `synonyms: 「${tag.label}」と同じ対象を指す表記ゆれ・略称・カタカナ/英語表記(最大8個)。\n` +
+        `excludes: 「${tag.label}」という文字列を含むのに意味が違う語(誤ヒットの原因。例:「猫」に対する「猫背」。なければ空配列)。\n` +
+        `JSONのみを出力してください。`,
+      { responseConstraint: schema }
+    );
+    if (request !== suggestionRequest) return;
+    renderAiCandidates(JSON.parse(res), tag);
+    status.textContent = "使いたい候補をクリックして選び、「選んだ候補を反映」を押してください";
+  } catch (e) {
+    if (request === suggestionRequest) status.textContent = `AIエラー: ${e.message ?? e}`;
+  } finally {
+    btn.disabled = false;
+  }
 });
+
+$("ai-apply").addEventListener("click", () => {
+  const pick = (boxId) =>
+    [...$(boxId).querySelectorAll(".chip-cand.selected")].map((c) => c.dataset.word);
+  const appendTo = (inputId, words) => {
+    if (words.length === 0) return;
+    const cur = splitWords($(inputId).value);
+    $(inputId).value = [...new Set([...cur, ...words])].join(", ");
+  };
+  appendTo("edit-words", pick("ai-syn"));
+  appendTo("edit-excludes", pick("ai-exc"));
+  $("ai-candidates").style.display = "none";
+  $("ai-status").textContent = "反映しました。「保存」を押すと確定します";
+});
+
+$("ai-clean").addEventListener("click", async () => {
+  const status = $("ai-clean-status");
+  const btn = $("ai-clean");
+  const words = topFreqWords().map(([w]) => w);
+  clearNoiseCandidates();
+  const request = noiseRequest;
+  const scope = statisticsScope;
+  if (words.length === 0) {
+    status.textContent = "まだ頻出単語がありません";
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const session = await getAiSession(status);
+    status.textContent = "ノイズを判定中...";
+    const schema = {
+      type: "object",
+      properties: { noise: { type: "array", items: { type: "string" } } },
+      required: ["noise"],
+    };
+    const res = await session.prompt(
+      `次の単語はSNSタイムラインの頻出単語ランキングです:\n${words.join("、")}\n` +
+        `この中から、話題・テーマの名前として意味を持たない語(一般的すぎる語、単語の断片、動詞や形容詞など)だけを noise に入れてください。` +
+        `固有名詞・作品名・商品名・ジャンル名はテーマなので入れないでください。JSONのみを出力してください。`,
+      { responseConstraint: schema }
+    );
+    if (request !== noiseRequest || !XTaggerStatistics.sameScope(scope, statisticsScope)) return;
+    const wordSet = new Set(words);
+    const result = JSON.parse(res);
+    if (!Array.isArray(result.noise)) throw new Error("候補の形式が正しくありません");
+    const noise = [...new Set(result.noise)].filter((w) => typeof w === "string" && wordSet.has(w));
+    if (noise.length === 0) {
+      status.textContent = "ノイズは見つかりませんでした";
+    } else {
+      noiseScope = scope;
+      noise.forEach((word) => $("ai-noise-words").appendChild(makeCandidateChip(word)));
+      $("ai-noise-candidates").style.display = "block";
+      status.textContent = "除外したい語を選び、「選んだ語を除外」で確定してください";
+    }
+  } catch (e) {
+    if (request === noiseRequest) status.textContent = `AIエラー: ${e.message ?? e}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function clearNoiseCandidates() {
+  noiseRequest++;
+  noiseScope = null;
+  $("ai-noise-words").textContent = "";
+  $("ai-noise-candidates").style.display = "none";
+  $("ai-clean-status").textContent = "";
+}
+
+$("ai-noise-cancel").addEventListener("click", clearNoiseCandidates);
+$("ai-noise-apply").addEventListener("click", async () => {
+  if (!XTaggerStatistics.sameScope(noiseScope, statisticsScope)) return;
+  const words = [...$("ai-noise-words").querySelectorAll(".chip-cand.selected")]
+    .map((chip) => chip.dataset.word);
+  if (!words.length) {
+    $("ai-clean-status").textContent = "除外したい語を選んでください";
+    return;
+  }
+  const scope = noiseScope;
+  const btn = $("ai-noise-apply");
+  btn.disabled = true;
+  try {
+    const result = await XTaggerStatistics.request("ignore", { scope, words });
+    if (!XTaggerStatistics.sameScope(scope, statisticsScope)) return;
+    clearNoiseCandidates();
+    $("ai-clean-status").textContent = result.stale
+      ? "集計が変更されました。候補を出し直してください"
+      : `${words.length}語を除外しました: ${words.join("、")}`;
+    await refreshPopup();
+  } catch (error) { showStorageError(error); }
+  finally { btn.disabled = false; }
+});
+
+async function initAi() {
+  const a = await aiAvailability();
+  if (a === "unavailable") {
+    // 内蔵AI非対応の環境ではAI機能ごと隠す(他機能には影響なし)
+    $("ai-suggest").style.display = "none";
+    $("ai-clean").style.display = "none";
+  } else if (a === "downloadable") {
+    $("ai-clean-status").textContent =
+      "初回利用時にAIモデルのダウンロードが必要です(数GB・Wi-Fi推奨)";
+  }
+}
+
+$("reset-counts").addEventListener("click", async () => {
+  const btn = $("reset-counts");
+  btn.disabled = true;
+  clearNoiseCandidates();
+  try {
+    const result = await XTaggerStatistics.request("reset", { scope: statisticsScope });
+    await refreshPopup();
+    if (result.stale) showStorageError(new Error("集計が変更されました。もう一度リセットしてください"));
+  } catch (error) { showStorageError(error); }
+  finally { btn.disabled = false; }
+});
+
+function showStorageError(error) {
+  $("storage-status").textContent = error.message ?? String(error);
+}
+
+async function refreshPopup() {
+  const serial = ++refreshSerial;
+  try {
+    const snapshot = await XTaggerStatistics.request("get");
+    if (serial !== refreshSerial) return;
+    if (!XTaggerStatistics.sameScope(statisticsScope, snapshot.scope)) {
+      clearNoiseCandidates();
+    }
+    statisticsScope = snapshot.scope;
+    data = { ...snapshot.config, ...snapshot.stats };
+    $("storage-status").textContent = "";
+    render();
+    if (!initialized) {
+      initialized = true;
+      document.querySelectorAll("button, input").forEach((el) => { el.disabled = false; });
+      initAi();
+    }
+  } catch (error) { showStorageError(error); }
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && Object.keys(changes).some((key) =>
+    ["keywords", "tagSets", "activeSet", "settings", "statisticsVersion"].includes(key) ||
+    key === XTaggerStatistics.key(statisticsScope?.setId))) {
+    refreshPopup();
+  }
+});
+
+refreshPopup();
