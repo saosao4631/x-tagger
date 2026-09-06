@@ -16,7 +16,6 @@ let editingIndex = null; // 編集中のタグの index。null なら編集パ�
 let statisticsScope = null;
 let refreshSerial = 0;
 let noiseRequest = 0;
-let noiseScope = null;
 let suggestionRequest = 0;
 let initialized = false;
 
@@ -31,7 +30,7 @@ function save(keys) {
 
 // タグの変更は必ずアクティブセットにも書き戻す(保存し忘れ防止)
 function saveKeywords() {
-  clearNoiseCandidates();
+  cancelNoiseRequest();
   const set = data.tagSets.find((s) => s.name === data.activeSet);
   if (set) set.keywords = data.keywords;
   save(["keywords", "tagSets"]);
@@ -40,7 +39,7 @@ function saveKeywords() {
 function switchSet(name) {
   const set = data.tagSets.find((s) => s.name === name);
   if (!set) return;
-  clearNoiseCandidates();
+  cancelNoiseRequest();
   data.activeSet = name;
   data.keywords = structuredClone(set.keywords);
   save(["keywords", "activeSet"]);
@@ -49,7 +48,7 @@ function switchSet(name) {
 
 function addSet(name) {
   if (!name || data.tagSets.some((s) => s.name === name)) return;
-  clearNoiseCandidates();
+  cancelNoiseRequest();
   data.tagSets.push({ id: crypto.randomUUID(), name, keywords: [] });
   data.activeSet = name;
   data.keywords = [];
@@ -61,7 +60,7 @@ function deleteSet(name) {
   const i = data.tagSets.findIndex((s) => s.name === name);
   if (i === -1) return;
   if (!confirm(`セット「${name}」を削除しますか?(中のタグも消えます)`)) return;
-  clearNoiseCandidates();
+  cancelNoiseRequest();
   data.tagSets.splice(i, 1);
   if (data.tagSets.length === 0) {
     data.tagSets.push({ id: crypto.randomUUID(), name: "セット1", keywords: [] });
@@ -281,8 +280,8 @@ function render() {
 
   if (top.length === 0) {
     freqBox.innerHTML =
-      data.keywords.length
-        ? '<span class="empty">このセットのタグに一致した投稿から集計します</span>'
+      data.keywords.length || data.autoKeywords.length
+        ? '<span class="empty">このセットの登録タグ・自動タグに一致した投稿から集計します</span>'
         : '<span class="empty">タグを登録すると、関連する投稿から集計が始まります</span>';
   }
   for (const [word, count] of top) {
@@ -388,11 +387,17 @@ $("auto-threshold").addEventListener("change", (e) => {
 // 対応していないマシンでは AI ボタンを非表示にし、他の機能には影響させない。
 
 let aiSession = null;
+// 利用可否の確認とセッション作成で、同じ入出力言語を指定する。
+// 日本語の指示と、英語を含むタグ名・候補を扱う。
+const AI_LANGUAGE_OPTIONS = {
+  expectedInputs: [{ type: "text", languages: ["ja", "en"] }],
+  expectedOutputs: [{ type: "text", languages: ["ja", "en"] }],
+};
 
 async function aiAvailability() {
   if (typeof LanguageModel === "undefined") return "unavailable";
   try {
-    return await LanguageModel.availability();
+    return await LanguageModel.availability(AI_LANGUAGE_OPTIONS);
   } catch {
     return "unavailable";
   }
@@ -406,16 +411,8 @@ async function getAiSession(statusEl) {
       statusEl.textContent = `モデルをダウンロード中... ${Math.round(e.loaded * 100)}%`;
     });
   };
-  try {
-    aiSession = await LanguageModel.create({
-      expectedInputs: [{ type: "text", languages: ["ja", "en"] }],
-      expectedOutputs: [{ type: "text", languages: ["ja"] }],
-      monitor,
-    });
-  } catch {
-    // 言語指定オプション非対応のバージョン向けフォールバック
-    aiSession = await LanguageModel.create({ monitor });
-  }
+  // 失敗時も言語指定を外して再試行せず、呼び出し元で理由を表示する。
+  aiSession = await LanguageModel.create({ ...AI_LANGUAGE_OPTIONS, monitor });
   return aiSession;
 }
 
@@ -507,7 +504,7 @@ $("ai-clean").addEventListener("click", async () => {
   const status = $("ai-clean-status");
   const btn = $("ai-clean");
   const words = topFreqWords().map(([w]) => w);
-  clearNoiseCandidates();
+  cancelNoiseRequest();
   const request = noiseRequest;
   const scope = statisticsScope;
   if (words.length === 0) {
@@ -537,10 +534,12 @@ $("ai-clean").addEventListener("click", async () => {
     if (noise.length === 0) {
       status.textContent = "ノイズは見つかりませんでした";
     } else {
-      noiseScope = scope;
-      noise.forEach((word) => $("ai-noise-words").appendChild(makeCandidateChip(word)));
-      $("ai-noise-candidates").style.display = "block";
-      status.textContent = "除外したい語を選び、「選んだ語を除外」で確定してください";
+      const saved = await XTaggerStatistics.request("ignore", { scope, words: noise });
+      if (request !== noiseRequest || !XTaggerStatistics.sameScope(scope, statisticsScope)) return;
+      status.textContent = saved.stale
+        ? "集計が変更されました。もう一度ノイズ除去を実行してください"
+        : `${noise.length}語を除外しました: ${noise.join("、")}`;
+      await refreshPopup();
     }
   } catch (e) {
     if (request === noiseRequest) status.textContent = `AIエラー: ${e.message ?? e}`;
@@ -549,37 +548,10 @@ $("ai-clean").addEventListener("click", async () => {
   }
 });
 
-function clearNoiseCandidates() {
+function cancelNoiseRequest() {
   noiseRequest++;
-  noiseScope = null;
-  $("ai-noise-words").textContent = "";
-  $("ai-noise-candidates").style.display = "none";
   $("ai-clean-status").textContent = "";
 }
-
-$("ai-noise-cancel").addEventListener("click", clearNoiseCandidates);
-$("ai-noise-apply").addEventListener("click", async () => {
-  if (!XTaggerStatistics.sameScope(noiseScope, statisticsScope)) return;
-  const words = [...$("ai-noise-words").querySelectorAll(".chip-cand.selected")]
-    .map((chip) => chip.dataset.word);
-  if (!words.length) {
-    $("ai-clean-status").textContent = "除外したい語を選んでください";
-    return;
-  }
-  const scope = noiseScope;
-  const btn = $("ai-noise-apply");
-  btn.disabled = true;
-  try {
-    const result = await XTaggerStatistics.request("ignore", { scope, words });
-    if (!XTaggerStatistics.sameScope(scope, statisticsScope)) return;
-    clearNoiseCandidates();
-    $("ai-clean-status").textContent = result.stale
-      ? "集計が変更されました。候補を出し直してください"
-      : `${words.length}語を除外しました: ${words.join("、")}`;
-    await refreshPopup();
-  } catch (error) { showStorageError(error); }
-  finally { btn.disabled = false; }
-});
 
 async function initAi() {
   const a = await aiAvailability();
@@ -596,7 +568,7 @@ async function initAi() {
 $("reset-counts").addEventListener("click", async () => {
   const btn = $("reset-counts");
   btn.disabled = true;
-  clearNoiseCandidates();
+  cancelNoiseRequest();
   try {
     const result = await XTaggerStatistics.request("reset", { scope: statisticsScope });
     await refreshPopup();
@@ -615,7 +587,7 @@ async function refreshPopup() {
     const snapshot = await XTaggerStatistics.request("get");
     if (serial !== refreshSerial) return;
     if (!XTaggerStatistics.sameScope(statisticsScope, snapshot.scope)) {
-      clearNoiseCandidates();
+      cancelNoiseRequest();
     }
     statisticsScope = snapshot.scope;
     data = { ...snapshot.config, ...snapshot.stats };

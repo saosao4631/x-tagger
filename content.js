@@ -16,6 +16,7 @@ let statisticsScope = null;
 let pendingCounts = Object.create(null);
 let ready = false;
 let refreshSerial = 0;
+let stopped = false;
 
 // ---------------------------------------------------------------- 単語分割
 
@@ -132,28 +133,52 @@ function countWords(rawText) {
 // chrome.* APIを呼ぶと "Extension context invalidated" になる。
 // 検知したら監視とタイマーを止めて静かに引退する
 function extensionAlive() {
-  return typeof chrome !== "undefined" && !!chrome.runtime?.id;
+  try {
+    return typeof chrome !== "undefined" && !!chrome.runtime?.id;
+  } catch {
+    // 更新直後はAPI自体へのアクセスが例外になることもある。
+    return false;
+  }
 }
 
 function shutdown() {
+  if (stopped) return;
+  stopped = true;
+  ready = false;
+  refreshSerial++; // 通信待ちの処理が戻っても再開させない
+  pendingCounts = Object.create(null);
   observer.disconnect();
   clearInterval(flushTimer);
+  if (scheduledFrame !== null) cancelAnimationFrame(scheduledFrame);
+  scheduledFrame = null;
+  try {
+    chrome.storage.onChanged.removeListener(onStorageChanged);
+  } catch {
+    // コンテキスト無効化後はリスナー解除もできないため、停止フラグで遮断する。
+  }
+}
+
+function stopIfInvalidated(error) {
+  if (stopped) return true;
+  if (!extensionAlive() || /Extension context invalidated/i.test(error?.message ?? "")) {
+    shutdown();
+    return true;
+  }
+  return false;
 }
 
 async function flushCounts() {
-  if (!extensionAlive()) {
-    shutdown();
-    return;
-  }
+  if (stopIfInvalidated()) return;
   if (!statisticsScope || Object.keys(pendingCounts).length === 0) return;
   const scope = statisticsScope;
   const counts = pendingCounts;
   pendingCounts = Object.create(null);
   try {
     await XTaggerStatistics.request("count", { scope, counts });
-  } catch {
-    if (!extensionAlive()) shutdown();
-    else if (XTaggerStatistics.sameScope(scope, statisticsScope)) {
+    stopIfInvalidated();
+  } catch (error) {
+    if (stopIfInvalidated(error)) return;
+    if (XTaggerStatistics.sameScope(scope, statisticsScope)) {
       for (const [word, count] of Object.entries(counts)) {
         pendingCounts[word] = (pendingCounts[word] || 0) + count;
       }
@@ -162,6 +187,7 @@ async function flushCounts() {
 }
 
 const flushTimer = setInterval(() => {
+  if (stopIfInvalidated()) return;
   if (ready) flushCounts();
   else refreshState();
 }, FLUSH_INTERVAL_MS);
@@ -201,7 +227,7 @@ function makeChip(label, kind) {
 }
 
 function processTweet(article) {
-  if (!ready) return;
+  if (!ready || stopIfInvalidated()) return;
   // 仮想スクロールでDOMノードが使い回されるため、ツイートの固有URLで
   // 「同じノードだが中身が変わった」ケースを検出して再処理する
   const link =
@@ -233,25 +259,24 @@ function processTweet(article) {
   const autoHits = compiledAuto
     .filter((a) => !tagWords.has(normalize(a.word)) && a.re.test(text))
     .map((a) => a.word);
+  const matchesTopic = hitTags.length > 0 || autoHits.length > 0;
 
   // フィルタモード: ホームTLでどのタグにもヒットしないツイートを隠す
   // (プロフィールや詳細ページまで隠すと使いものにならないのでTL限定)
   if (
     state.settings.filterMode &&
     isHomeTimeline() &&
-    hitTags.length === 0 &&
-    autoHits.length === 0
+    !matchesTopic
   ) {
     (cell ?? article).classList.add("xt-hidden");
     return;
   }
 
-  // 単語集計は「設定したタグにヒットしたツイート」だけを対象にする。
-  // 登録タグに関連する話題の中で他に何が頻出しているか(共起語)を見るため、
-  // タグと無関係なツイートの単語はランキングに混ぜない。
-  // → タグを1つも登録していないうちは頻出単語は集計されない。
+  // 登録タグ・自動タグのどちらにヒットした投稿も集計する。
+  // 例: Python関連でDjangoが昇格したら、Pythonを含まないDjango投稿からも
+  // 次の関連語を見つける。どちらにも一致しない投稿は集計しない。
   // ツイートIDごとに1回だけ数える(再描画・スクロール往復で重複させない)
-  if (hitTags.length > 0 && rawText && link && !countedTweetIds.has(link)) {
+  if (matchesTopic && rawText && link && !countedTweetIds.has(link)) {
     countedTweetIds.add(link);
     if (countedTweetIds.size > COUNTED_IDS_MAX) {
       countedTweetIds.delete(countedTweetIds.values().next().value);
@@ -259,7 +284,7 @@ function processTweet(article) {
     countWords(rawText);
   }
 
-  if (hitTags.length > 0 || autoHits.length > 0) {
+  if (matchesTopic) {
     const bar = document.createElement("div");
     bar.className = "xt-chips";
     hitTags.forEach((tag) => bar.appendChild(makeChip(tag.label, "user")));
@@ -278,6 +303,7 @@ function scan(root) {
 }
 
 function reprocessAll() {
+  // 新しく登録・昇格した語は、フィルタで隠していた投稿も含めて再判定する。
   document.querySelectorAll('article[data-testid="tweet"]').forEach((a) => {
     delete a.dataset.xtDone;
   });
@@ -286,13 +312,13 @@ function reprocessAll() {
 
 // ------------------------------------------------------------------- 監視
 
-let scheduled = false;
+let scheduledFrame = null;
 const observer = new MutationObserver(() => {
   // 変更が連発するのでフレーム単位でまとめて処理
-  if (scheduled) return;
-  scheduled = true;
-  requestAnimationFrame(() => {
-    scheduled = false;
+  if (stopIfInvalidated() || scheduledFrame !== null) return;
+  scheduledFrame = requestAnimationFrame(() => {
+    scheduledFrame = null;
+    if (stopIfInvalidated()) return;
     scan(document);
   });
 });
@@ -300,12 +326,14 @@ const observer = new MutationObserver(() => {
 // --------------------------------------------------------------------- 起動
 
 async function refreshState() {
+  if (stopIfInvalidated()) return;
   const serial = ++refreshSerial;
   ready = false;
-  await flushCounts();
   try {
+    await flushCounts();
+    if (stopIfInvalidated() || serial !== refreshSerial) return;
     const snapshot = await XTaggerStatistics.request("get");
-    if (serial !== refreshSerial) return;
+    if (stopIfInvalidated() || serial !== refreshSerial) return;
     const previous = statisticsScope;
     statisticsScope = snapshot.scope;
     if (!XTaggerStatistics.sameScope(previous, statisticsScope)) {
@@ -324,20 +352,26 @@ async function refreshState() {
     ready = true;
     reprocessAll();
   } catch (error) {
-    if (!extensionAlive()) shutdown();
-    else console.warn("X Tagger: 集計の読み込みに失敗しました", error);
+    if (!stopIfInvalidated(error)) console.warn("X Tagger: 集計の読み込みに失敗しました", error);
   }
 }
 
 // ポップアップで設定が変わったら即反映
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local") return;
+function onStorageChanged(changes, area) {
+  if (stopIfInvalidated() || area !== "local") return;
   if (Object.keys(changes).some((key) =>
     ["keywords", "tagSets", "activeSet", "settings", "statisticsVersion"].includes(key) ||
     key === XTaggerStatistics.key(statisticsScope?.setId))) {
     refreshState();
   }
-});
+}
 
-observer.observe(document.body, { childList: true, subtree: true });
-refreshState();
+if (!stopIfInvalidated()) {
+  try {
+    chrome.storage.onChanged.addListener(onStorageChanged);
+    observer.observe(document.body, { childList: true, subtree: true });
+    refreshState();
+  } catch (error) {
+    if (!stopIfInvalidated(error)) console.warn("X Tagger: 起動に失敗しました", error);
+  }
+}

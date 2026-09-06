@@ -398,20 +398,11 @@
   </div>
 
   <div class="card">
-    <h2>頻出単語 <span class="hint">このセットのタグに一致した投稿</span></h2>
+    <h2>頻出単語 <span class="hint">登録タグ・自動タグに一致した投稿</span></h2>
+    <p class="hint">登録・昇格した語でも投稿を拾い、関連する単語を見つけます。</p>
     <p class="hint">タグ・同義語・除外語を変えると集計を始め直します。</p>
     <div id="freq" class="freq-list"></div>
-    <button id="ai-clean" class="ai-btn">AIでノイズ候補を出す</button>
-    <div id="ai-noise-candidates" style="display: none">
-      <div class="ai-group">
-        <span class="ai-label">除外候補（選んだ語だけ確定）</span>
-        <div id="ai-noise-words" class="chips"></div>
-      </div>
-      <div class="editor-actions">
-        <button id="ai-noise-cancel">キャンセル</button>
-        <button id="ai-noise-apply" class="primary">選んだ語を除外</button>
-      </div>
-    </div>
+    <button id="ai-clean" class="ai-btn">AIでノイズ除去</button>
     <div id="ai-clean-status" class="hint"></div>
   </div>
 

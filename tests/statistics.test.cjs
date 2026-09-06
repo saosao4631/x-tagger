@@ -56,7 +56,13 @@ function environment(initial = legacy()) {
           });
         },
       },
-      onChanged: { addListener(callback) { listeners.push(callback); } },
+      onChanged: {
+        addListener(callback) { listeners.push(callback); },
+        removeListener(callback) {
+          const index = listeners.indexOf(callback);
+          if (index !== -1) listeners.splice(index, 1);
+        },
+      },
     },
   };
   function context(extra = {}) {
@@ -158,12 +164,21 @@ function popup(env, prompt = async () => '{"noise":["django","flask","not-in-ran
   return { context, elements };
 }
 
-function content(env) {
+function content(env, overrides = {}) {
   const document = new Document();
+  const lifecycle = { disconnected: 0, clearedTimers: 0, cancelledFrames: 0 };
   const context = env.context({
     document, Element, Document, location: { pathname: "/home" }, Intl,
-    MutationObserver: class { observe() {} disconnect() {} },
-    requestAnimationFrame() {}, setInterval() { return 1; }, clearInterval() {},
+    MutationObserver: class {
+      constructor(callback) { lifecycle.mutation = callback; }
+      observe() {}
+      disconnect() { lifecycle.disconnected++; }
+    },
+    requestAnimationFrame(callback) { lifecycle.frame = callback; return 1; },
+    cancelAnimationFrame() { lifecycle.cancelledFrames++; },
+    setInterval(callback) { lifecycle.timer = callback; return 1; },
+    clearInterval() { lifecycle.clearedTimers++; },
+    ...overrides,
   });
   vm.runInContext(source("content.js"), context);
   function addTweet(id, text, promoted = false) {
@@ -184,7 +199,7 @@ function content(env) {
     return article;
   }
   const flush = async () => { await vm.runInContext("flushCounts()", context); await env.settle(); };
-  return { context, document, addTweet, flush };
+  return { context, document, addTweet, flush, lifecycle };
 }
 
 test("migration preserves tags and ignored words, isolates legacy counts and automatic tags", async () => {
@@ -298,26 +313,19 @@ test("reset discards unflushed counts in multiple live tabs and collects new pos
   assert.deepEqual((await env.request("get")).stats.wordCounts, { python: 1, fastapi: 1 });
 });
 
-test("AI cleanup previews unselected candidates, cancel writes nothing, applies only selected words", async () => {
+test("AI cleanup immediately excludes all returned ranking words with one click", async () => {
   const env = environment();
   const { scope } = await env.request("get");
-  await env.request("count", { scope, counts: { django: 1, flask: 1 } });
+  await env.request("count", { scope, counts: { django: 1, flask: 1, celery: 1 } });
   const ui = popup(env);
   await env.settle();
   await ui.elements["ai-clean"].fire();
-  const candidates = ui.elements["ai-noise-words"].children;
-  assert.deepEqual(candidates.map((chip) => chip.dataset.word), ["django", "flask"]);
-  assert.ok(candidates.every((chip) => !chip.classList.contains("selected")));
-  assert.deepEqual((await env.request("get")).stats.ignoredWords, ["noise"]);
-  await ui.elements["ai-noise-apply"].fire();
-  assert.deepEqual((await env.request("get")).stats.ignoredWords, ["noise"]);
-  await ui.elements["ai-noise-cancel"].fire();
-  assert.equal(ui.elements["ai-noise-candidates"].style.display, "none");
-  await ui.elements["ai-clean"].fire();
-  await ui.elements["ai-noise-words"].children[0].fire();
-  await ui.elements["ai-noise-apply"].fire();
   await env.settle();
-  assert.deepEqual((await env.request("get")).stats.ignoredWords, ["noise", "django"]);
+  assert.deepEqual((await env.request("get")).stats.ignoredWords, ["noise", "django", "flask"]);
+  assert.deepEqual(ui.elements.freq.querySelectorAll(".freq-word").map((el) => el.textContent), ["celery"]);
+  assert.match(ui.elements["ai-clean-status"].textContent, /2語を除外しました: django、flask/);
+  assert.equal(ui.elements["ai-clean"].disabled, false);
+  assert.deepEqual((await env.switchSet("趣味")).stats.ignoredWords, ["noise"]);
 });
 
 test("AI results generated before a set switch or reset cannot be applied afterward", async () => {
@@ -332,7 +340,7 @@ test("AI results generated before a set switch or reset cannot be applied afterw
   await env.switchSet("趣味");
   finish('{"noise":["django"]}');
   await generation;
-  assert.equal(ui.elements["ai-noise-candidates"].style.display, "none");
+  assert.equal(ui.elements["ai-clean-status"].textContent, "");
   assert.deepEqual((await env.request("get")).stats.ignoredWords, ["noise"]);
   await env.switchSet("仕事");
   const second = ui.elements["ai-clean"].fire();
@@ -341,8 +349,9 @@ test("AI results generated before a set switch or reset cannot be applied afterw
   await env.settle();
   finish('{"noise":["django"]}');
   await second;
-  assert.equal(ui.elements["ai-noise-candidates"].style.display, "none");
+  assert.equal(ui.elements["ai-clean-status"].textContent, "");
   assert.deepEqual((await env.request("get")).stats.wordCounts, {});
+  assert.deepEqual((await env.request("get")).stats.ignoredWords, ["noise"]);
 });
 
 test("popup creates, edits and deletes sets without exposing another set's statistics", async () => {
@@ -386,6 +395,216 @@ test("malformed AI output leaves stored exclusions unchanged", async () => {
   await env.settle();
   await ui.elements["ai-clean"].fire();
   assert.match(ui.elements["ai-clean-status"].textContent, /AIエラー/);
-  assert.equal(ui.elements["ai-noise-candidates"].style.display, "none");
+  assert.equal(ui.elements["ai-clean"].disabled, false);
   assert.deepEqual((await env.request("get")).stats.ignoredWords, ["noise"]);
+});
+
+test("an invalidated API getter stops timers, observers and queued callbacks without throwing", async () => {
+  const env = environment();
+  let invalidated = false;
+  let calls = 0;
+  const runtime = { ...env.chrome.runtime, sendMessage(message) {
+    calls++;
+    return env.chrome.runtime.sendMessage(message);
+  } };
+  const chrome = { ...env.chrome, get runtime() {
+    if (invalidated) throw new Error("Extension context invalidated.");
+    return runtime;
+  } };
+  const tab = content(env, { chrome });
+  await env.settle();
+  tab.lifecycle.mutation();
+  const queuedFrame = tab.lifecycle.frame;
+  invalidated = true;
+  assert.doesNotThrow(tab.lifecycle.timer);
+  const previousCalls = calls;
+  await vm.runInContext("refreshState()", tab.context);
+  tab.lifecycle.timer();
+  tab.lifecycle.mutation();
+  queuedFrame();
+  vm.runInContext('onStorageChanged({ keywords: {} }, "local")', tab.context);
+  await env.settle();
+  assert.equal(calls, previousCalls);
+  assert.equal(tab.lifecycle.disconnected, 1);
+  assert.equal(tab.lifecycle.clearedTimers, 1);
+  assert.equal(tab.lifecycle.cancelledFrames, 1);
+  assert.equal(tab.addTweet(1, "Python Django").dataset.xtDone, undefined);
+});
+
+test("invalidation during a count flush stops refresh even when runtime.id is still readable", async () => {
+  const env = environment();
+  let invalidated = false;
+  const calls = [];
+  const chrome = { ...env.chrome, runtime: { ...env.chrome.runtime, sendMessage(message) {
+    calls.push(message.type);
+    if (invalidated) throw new Error("Extension context invalidated.");
+    return env.chrome.runtime.sendMessage(message);
+  } } };
+  const warnings = [];
+  const tab = content(env, { chrome, console: { warn: (...args) => warnings.push(args) } });
+  await env.settle();
+  tab.addTweet(1, "Python Django");
+  calls.length = 0;
+  invalidated = true;
+  await vm.runInContext("refreshState()", tab.context);
+  assert.deepEqual(calls, ["statistics:count"]);
+  assert.equal(tab.lifecycle.clearedTimers, 1);
+  assert.deepEqual(warnings, []);
+  assert.equal(tab.addTweet(2, "Python Flask").dataset.xtDone, undefined);
+});
+
+test("a response arriving after shutdown cannot resume content processing", async () => {
+  const env = environment();
+  let hold = false;
+  let release;
+  const runtime = { ...env.chrome.runtime, sendMessage(message) {
+    if (hold) return new Promise((resolve) => { release = resolve; });
+    return env.chrome.runtime.sendMessage(message);
+  } };
+  const tab = content(env, { chrome: { ...env.chrome, runtime } });
+  await env.settle();
+  const snapshot = await env.request("get");
+  hold = true;
+  const refresh = vm.runInContext("refreshState()", tab.context);
+  await env.settle();
+  runtime.id = undefined;
+  tab.lifecycle.timer();
+  release(snapshot);
+  await refresh;
+  assert.equal(tab.lifecycle.disconnected, 1);
+  assert.equal(tab.addTweet(1, "Python Django").dataset.xtDone, undefined);
+});
+
+test("invalidation during listener registration or removal is handled quietly", async () => {
+  const env = environment();
+  const warnings = [];
+  const invalid = () => { throw new Error("Extension context invalidated."); };
+  const chrome = { ...env.chrome, storage: { ...env.chrome.storage, onChanged: {
+    addListener: invalid, removeListener: invalid,
+  } } };
+  const tab = content(env, { chrome, console: { warn: (...args) => warnings.push(args) } });
+  await env.settle();
+  assert.equal(tab.lifecycle.clearedTimers, 1);
+  assert.equal(tab.lifecycle.disconnected, 1);
+  assert.deepEqual(warnings, []);
+});
+
+test("ordinary messaging failures retain pending counts for retry", async () => {
+  const env = environment();
+  let fail = false;
+  const chrome = { ...env.chrome, runtime: { ...env.chrome.runtime, sendMessage(message) {
+    if (fail) return Promise.reject(new Error("Worker temporarily unavailable"));
+    return env.chrome.runtime.sendMessage(message);
+  } } };
+  const tab = content(env, { chrome });
+  await env.settle();
+  tab.addTweet(1, "Python Django");
+  fail = true;
+  await tab.flush();
+  assert.equal(tab.lifecycle.clearedTimers, 0);
+  fail = false;
+  await tab.flush();
+  assert.deepEqual((await env.request("get")).stats.wordCounts, { python: 1, django: 1 });
+});
+
+test("AI availability and session creation declare matching input and output languages", async () => {
+  const env = environment();
+  const ui = popup(env);
+  await env.settle();
+  let checked;
+  let created;
+  ui.context.LanguageModel = {
+    availability: async (options) => { checked = clone(options); return "available"; },
+    create: async ({ monitor, ...options }) => { created = clone(options); return {}; },
+  };
+  await vm.runInContext("aiAvailability()", ui.context);
+  await vm.runInContext('getAiSession($("ai-status"))', ui.context);
+  assert.deepEqual(checked, created);
+  assert.deepEqual(created.expectedOutputs, [{ type: "text", languages: ["ja", "en"] }]);
+  assert.deepEqual(created.expectedInputs, [{ type: "text", languages: ["ja", "en"] }]);
+});
+
+test("AI initialization errors are displayed without retrying with missing language options", async () => {
+  const env = environment();
+  const { scope } = await env.request("get");
+  await env.request("count", { scope, counts: { django: 1 } });
+  const ui = popup(env);
+  await env.settle();
+  const calls = [];
+  ui.context.LanguageModel.create = async ({ monitor, ...options }) => {
+    calls.push(clone(options));
+    throw new Error("Model download failed");
+  };
+  await ui.elements["ai-clean"].fire();
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].expectedOutputs, [{ type: "text", languages: ["ja", "en"] }]);
+  assert.match(ui.elements["ai-clean-status"].textContent, /Model download failed/);
+  assert.equal(ui.elements["ai-clean"].disabled, false);
+  assert.deepEqual((await env.request("get")).stats.ignoredWords, ["noise"]);
+});
+
+for (const filterMode of [true, false]) {
+  test(`automatic promotion expands collection beyond the original tags (filterMode=${filterMode})`, async () => {
+    const initial = legacy();
+    initial.settings.filterMode = filterMode;
+    const env = environment(initial);
+    const tab = content(env);
+    await env.settle();
+    const djangoPost = tab.addTweet(10, "Django Celery");
+    const celeryPost = tab.addTweet(11, "Celery Redis");
+    const unrelated = tab.addTweet(12, "Soccer Stadium");
+    const ad = tab.addTweet(13, "Django Advertisement", true);
+    const hidden = (article) => article.closest('[data-testid="cellInnerDiv"]').classList.contains("xt-hidden");
+    assert.equal(hidden(djangoPost), filterMode);
+    tab.addTweet(1, "Python Django");
+    tab.addTweet(2, "Python Django");
+    tab.addTweet(3, "Python Django");
+    await tab.flush();
+    assert.ok((await env.request("get")).stats.autoKeywords.includes("django"));
+    assert.equal(hidden(djangoPost), false);
+    await tab.flush();
+    const first = (await env.request("get")).stats;
+    assert.equal(first.wordCounts.python, 3);
+    assert.equal(first.wordCounts.celery, 1);
+    assert.equal(first.wordCounts.redis, undefined);
+
+    // 新たに拾った投稿から次の自動タグが生まれ、さらに対象が広がる。
+    tab.addTweet(4, "Django Celery");
+    tab.addTweet(5, "Django Celery");
+    await tab.flush();
+    assert.ok((await env.request("get")).stats.autoKeywords.includes("celery"));
+    assert.equal(hidden(celeryPost), false);
+    await tab.flush();
+    const expanded = (await env.request("get")).stats;
+    assert.equal(expanded.wordCounts.redis, 1);
+    assert.equal(expanded.wordCounts.python, 3); // 再判定で元の投稿を二重に数えない
+    assert.equal(expanded.wordCounts.stadium, undefined);
+    assert.equal(expanded.wordCounts.advertisement, undefined);
+    assert.equal(hidden(unrelated), filterMode);
+    assert.equal(hidden(ad), true);
+  });
+}
+
+test("registering a frequent word also includes previously filtered posts without the original tag", async () => {
+  const initial = legacy();
+  initial.settings.filterMode = true;
+  const env = environment(initial);
+  const tab = content(env);
+  const ui = popup(env);
+  await env.settle();
+  const hiddenPost = tab.addTweet(2, "Django Celery");
+  tab.addTweet(1, "Python Django");
+  await tab.flush();
+  const cell = hiddenPost.closest('[data-testid="cellInnerDiv"]');
+  assert.equal(cell.classList.contains("xt-hidden"), true);
+  assert.equal((await env.request("get")).stats.wordCounts.celery, undefined);
+  const row = ui.elements.freq.children.find((row) =>
+    row.querySelectorAll(".freq-word")[0]?.textContent === "django");
+  await row.querySelectorAll(".freq-add")[0].fire();
+  await env.settle();
+  await tab.flush();
+  assert.equal(cell.classList.contains("xt-hidden"), false);
+  const current = await env.request("get");
+  assert.ok(current.config.keywords.some((tag) => tag.label === "django"));
+  assert.equal(current.stats.wordCounts.celery, 1);
 });
